@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Take Attendance - Instructions</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <style>
+        :root {
+            --bg-primary: #121212;
+            --bg-secondary: #1e1e1e;
+            --accent-color: #3498db;
+            --text-primary: #e0e0e0;
+            --success-color: #27ae60;
+        }
+        
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: 'Poppins', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .instruction-container {
+            max-width: 800px;
+            background: var(--bg-secondary);
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        
+        .icon-large {
+            font-size: 80px;
+            color: var(--accent-color);
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        .step {
+            background: rgba(52, 152, 219, 0.1);
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 10px;
+            border-left: 4px solid var(--accent-color);
+        }
+        
+        .step-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            background: var(--accent-color);
+            color: white;
+            border-radius: 50%;
+            font-weight: bold;
+            margin-right: 15px;
+        }
+        
+        .btn-start {
+            background: linear-gradient(45deg, #3498db, #9b59b6);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 25px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        
+        .btn-start:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(52, 152, 219, 0.4);
+        }
+        
+        .btn-back {
+            background: transparent;
+            color: var(--text-primary);
+            border: 2px solid var(--text-primary);
+            padding: 12px 30px;
+            border-radius: 25px;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .btn-back:hover {
+            background: var(--text-primary);
+            color: var(--bg-primary);
+        }
+    </style>
+</head>
+<body>
+    <div class="instruction-container text-center">
+        <i class="material-icons icon-large">videocam</i>
+        <h1 class="mt-4 mb-4">Camera Attendance System</h1>
+        
+        <div class="alert alert-info mb-4">
+            <strong>Note:</strong> This will open a camera window on the server where the application is running.
+        </div>
+        
+        <div class="text-start">
+            <div class="step">
+                <span class="step-number">1</span>
+                <strong>Camera Opens:</strong> A window will appear showing the live camera feed on the server.
+            </div>
+            
+            <div class="step">
+                <span class="step-number">2</span>
+                <strong>Position Yourself:</strong> Stand in front of the camera so your face is clearly visible in the frame.
+            </div>
+            
+            <div class="step">
+                <span class="step-number">3</span>
+                <strong>Press 'a' Key:</strong> When you see green boxes around faces, press the 'a' key to mark attendance for all visible recognized users simultaneously.
+            </div>
+            
+            <div class="step">
+                <span class="step-number">4</span>
+                <strong>Confirmation:</strong> You'll see "Attendance Marked!" message if successful.
+            </div>
+            
+            <div class="step">
+                <span class="step-number">5</span>
+                <strong>Exit:</strong> Press 'q' key to close the camera window and return to the main page.
+            </div>
+        </div>
+        
+        <div class="alert alert-warning mt-4">
+            <i class="material-icons align-middle">warning</i>
+            <strong>Important:</strong> Make sure you have access to the server's keyboard to interact with the camera window.
+        </div>
+        
+        <div class="mt-5 d-flex gap-3 justify-content-center">
+            <a href="/" class="btn-back">
+                <i class="material-icons align-middle me-2">arrow_back</i> Cancel
+            </a>
+            <form action="/start" method="POST" id="cameraForm">
+                <button type="submit" class="btn-start" id="startBtn">
+                    <i class="material-icons align-middle me-2">camera</i> Open Camera
+                </button>
+            </form>
+        </div>
+        
+        <div id="loading" style="display: none; margin-top: 20px;">
+            <p>Opening camera, please wait...</p>
+        </div>
+    </div>
+    
+    <script>
+        document.getElementById('cameraForm').addEventListener('submit', function(e) {
+            // Show loading message
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').innerHTML = '<i class="material-icons align-middle me-2">hourglass_empty</i> Opening...';
+        });
+    </script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
