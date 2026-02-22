@@ -1,4 +1,3 @@
-import sqlite3
 import cv2  # type: ignore
 import os
 import numpy as np
@@ -11,12 +10,17 @@ import shutil
 from functools import wraps
 import hashlib
 
+from database import init_db_config, db
+from models import Admin, Student
+from helpers import save_student_with_encoding, mark_attendance
+
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
 
 #### Defining Flask App
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here-change-this-in-production'  # Change this to a random secret key
+init_db_config(app)
 
 #### Saving Date today in 2 different formats
 datetoday = date.today().strftime("%m_%d_%y")
@@ -95,76 +99,52 @@ if f'Attendance-{datetoday}.csv' not in os.listdir('Attendance'):
     with open(f'Attendance/Attendance-{datetoday}.csv','w') as f:
         f.write('Name,Roll,Time')
 
-# Initialize SQLite database for admin users
-def init_db():
-    conn = sqlite3.connect('admin_users.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS admins
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  username TEXT UNIQUE NOT NULL,
-                  password TEXT NOT NULL,
-                  email TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # Create default admin if not exists
-    default_password = hashlib.sha256('admin123'.encode()).hexdigest()
-    try:
-        c.execute("INSERT INTO admins (username, password, email) VALUES (?, ?, ?)",
-                  ('admin', default_password, 'admin@example.com'))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass  # Admin already exists
-    
-    conn.close()
+def initialize_database():
+    with app.app_context():
+        db.create_all()
+        default_admin = Admin.query.filter_by(username='admin').first()
+        if default_admin is None:
+            default_admin = Admin(
+                username='admin',
+                password=hashlib.sha256('admin123'.encode()).hexdigest(),
+                email='admin@example.com',
+            )
+            db.session.add(default_admin)
+            db.session.commit()
 
-# Initialize database on startup
-init_db()
 
-# Hash password
+initialize_database()
+
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# Verify user credentials
+
 def verify_user(username, password):
-    conn = sqlite3.connect('admin_users.db')
-    c = conn.cursor()
     hashed_password = hash_password(password)
-    c.execute("SELECT * FROM admins WHERE username=? AND password=?", (username, hashed_password))
-    user = c.fetchone()
-    conn.close()
+    user = Admin.query.filter_by(username=username, password=hashed_password).first()
     return user is not None
 
-# Create new admin user
+
 def create_user(username, password, email):
-    try:
-        conn = sqlite3.connect('admin_users.db')
-        c = conn.cursor()
-        hashed_password = hash_password(password)
-        c.execute("INSERT INTO admins (username, password, email) VALUES (?, ?, ?)",
-                  (username, hashed_password, email))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        return False  # Username already exists
+    if Admin.query.filter_by(username=username).first() is not None:
+        return False
 
-# Check if username exists
+    user = Admin(username=username, password=hash_password(password), email=email)
+    db.session.add(user)
+    db.session.commit()
+    return True
+
+
 def username_exists(username):
-    conn = sqlite3.connect('admin_users.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM admins WHERE username=?", (username,))
-    user = c.fetchone()
-    conn.close()
-    return user is not None
+    return Admin.query.filter_by(username=username).first() is not None
 
-# Reset password
+
 def reset_password(username, new_password):
-    conn = sqlite3.connect('admin_users.db')
-    c = conn.cursor()
-    hashed_password = hash_password(new_password)
-    c.execute("UPDATE admins SET password=? WHERE username=?", (hashed_password, username))
-    conn.commit()
-    conn.close()
+    user = Admin.query.filter_by(username=username).first()
+    if user:
+        user.password = hash_password(new_password)
+        db.session.commit()
 
 # Login required decorator
 def login_required(f):
@@ -385,24 +365,24 @@ def add_attendance(name, roll):
         from datetime import datetime
         datetoday = datetime.now().strftime("%m_%d_%y")
         filename = f'Attendance/Attendance-{datetoday}.csv'
-        
-        # Create file if it doesn't exist
+
+        student = Student.query.filter_by(roll_no=str(roll)).first()
+        if student is None:
+            student = save_student_with_encoding(str(roll), name, department="General")
+
+        _, created = mark_attendance(student.id)
+        if not created:
+            print(f"Attendance already marked for {name}_{roll}")
+            return False
+
         if not os.path.exists(filename):
             with open(filename, 'w') as f:
                 f.write('Name,Roll,Time')
-                
-        # Check if already marked attendance
-        if os.path.exists(filename):
-            df = pd.read_csv(filename)
-            if df[(df['Name'] == name) & (df['Roll'] == roll)].shape[0] > 0:
-                print(f"Attendance already marked for {name}_{roll}")
-                return False
-                
-        # Record attendance
+
         current_time = datetime.now().strftime("%H:%M:%S")
         with open(filename, 'a') as f:
             f.write(f'\n{name},{roll},{current_time}')
-            
+
         print(f"Attendance marked for {name}_{roll}")
         return True
     except Exception as e:
@@ -761,7 +741,15 @@ def add():
         # Train model with new data
         print("Training model with new user data...")
         train_model()
-        
+
+        # Persist student + binary face encoding in PostgreSQL
+        save_student_with_encoding(
+            roll_no=str(newuserid),
+            name=newusername,
+            department="General",
+            folder_path=userimagefolder,
+        )
+
         return redirect(url_for('home'))
     except Exception as e:
         print(f"Error in add user: {str(e)}")
@@ -814,6 +802,12 @@ def admin_delete_user():
             print(f"Deleted user folder: {folder}")
         else:
             print(f"Folder not found for deletion: {folder}")
+
+        student = Student.query.filter_by(roll_no=str(user_id)).first()
+        if student:
+            db.session.delete(student)
+            db.session.commit()
+
         # Retrain model after deletion
         train_model()
     except Exception as e:
@@ -841,6 +835,14 @@ def admin_edit_user():
                 shutil.rmtree(new_folder)
             os.rename(old_folder, new_folder)
             print(f"Renamed {old_folder} -> {new_folder}")
+
+            student = Student.query.filter_by(roll_no=str(old_id)).first()
+            if student:
+                student.roll_no = str(new_id)
+                student.name = new_name
+                db.session.commit()
+                save_student_with_encoding(str(new_id), new_name, department=student.department or "General", folder_path=new_folder)
+
             # Retrain model so labels reflect new folder name
             train_model()
         else:
