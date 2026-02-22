@@ -1,4 +1,5 @@
 import os
+from urllib.parse import quote_plus
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 
@@ -14,8 +15,10 @@ def init_db_config(app):
     db_host = os.getenv("DB_HOST", "localhost")
     db_port = os.getenv("DB_PORT", "5432")
 
+    encoded_password = quote_plus(db_password)
+
     app.config["SQLALCHEMY_DATABASE_URI"] = (
-        f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        f"postgresql+psycopg2://{db_user}:{encoded_password}@{db_host}:{db_port}/{db_name}"
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
