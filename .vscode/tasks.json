@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run attendance app",
+			"type": "shell",
+			"command": "C:/new-automated_attanance-main 3.0/.venv/Scripts/python.exe",
+			"args": [
+				"Attendance system project main/app.py"
+			],
+			"isBackground": false
+		}
+	]
+}
