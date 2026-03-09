@@ -1,7 +1,8 @@
 import cv2  # type: ignore
 import os
 import numpy as np
-from flask import Flask, request, render_template, redirect, url_for, session, flash, send_from_directory
+import face_recognition
+from flask import Flask, request, render_template, redirect, url_for, session, flash, Response
 from datetime import date, datetime
 import pandas as pd
 import joblib
@@ -9,13 +10,23 @@ import time
 import shutil
 from functools import wraps
 import hashlib
+import csv
+from collections import deque, Counter, defaultdict
 
 from database import init_db_config, db
-from models import Admin, Student
+from models import Admin, Student, Attendance
 from helpers import save_student_with_encoding, mark_attendance
 
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
+STRICT_THRESHOLD = float(os.environ.get('FACE_STRICT_THRESHOLD', '0.48'))
+MIN_FACE_SIZE = int(os.environ.get('FACE_MIN_SIZE', '60'))
+AMBIGUITY_MARGIN = float(os.environ.get('FACE_AMBIGUITY_MARGIN', '0.03'))
+TOP_K_PER_USER = int(os.environ.get('FACE_TOP_K', '3'))
+PREDICTION_BUFFER_SIZE = int(os.environ.get('FACE_PREDICTION_BUFFER', '5'))
+CONFIRM_FRAMES = int(os.environ.get('FACE_CONFIRM_FRAMES', '3'))
+MAX_MISSES_BEFORE_RESET = int(os.environ.get('FACE_MAX_MISSES', '8'))
+UNKNOWN_LOG_COOLDOWN_SEC = float(os.environ.get('FACE_UNKNOWN_LOG_COOLDOWN', '3'))
 
 #### Defining Flask App
 app = Flask(__name__)
@@ -33,6 +44,7 @@ cap = None
 
 # Robust camera opener for Windows (deterministic order)
 def open_camera():
+    print("Starting camera initialization...")
     # Release any lingering handles
     for i in range(5):
         tmp = cv2.VideoCapture(i)
@@ -42,29 +54,52 @@ def open_camera():
     devices = [0, 1]
 
     def try_open(device, backend, delay):
+        backend_name = {cv2.CAP_DSHOW: "DSHOW", cv2.CAP_MSMF: "MSMF", cv2.CAP_ANY: "ANY"}.get(backend, "UNKNOWN")
+        print(f"Trying device {device} with backend {backend_name}...")
+        
         cap = cv2.VideoCapture(device, backend)
         time.sleep(delay)
-        if cap.isOpened():
-            # Set properties
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            fourcc_fn = getattr(cv2, "VideoWriter_fourcc", None)
-            if callable(fourcc_fn):
-                fourcc_val = fourcc_fn(*'MJPG')
-                if isinstance(fourcc_val, (int, float)):
-                    cap.set(cv2.CAP_PROP_FOURCC, float(fourcc_val))
+        
+        if not cap.isOpened():
+            print(f"  Device {device} ({backend_name}): Failed to open")
+            cap.release()
+            return None
+            
+        print(f"  Device {device} ({backend_name}): Opened successfully")
+        
+        # Set properties
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        fourcc_fn = getattr(cv2, "VideoWriter_fourcc", None)
+        if callable(fourcc_fn):
+            fourcc_val = fourcc_fn(*'MJPG')
+            if isinstance(fourcc_val, (int, float)):
+                cap.set(cv2.CAP_PROP_FOURCC, float(fourcc_val))
 
-            # Grab a few frames to validate
-            good = 0
-            for _ in range(5):
-                ret, frame = cap.read()
-                if ret and frame is not None and frame.size > 0 and 1 < frame.mean() < 254:
+        # Grab a few frames to validate
+        print(f"  Validating frames from device {device}...")
+        good = 0
+        for i in range(10):  # Try more frames for validation
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                mean_val = frame.mean()
+                if 1 < mean_val < 254:
                     good += 1
-                time.sleep(0.02)
-            if good >= 2:
-                return cap
+                    print(f"    Frame {i+1}: Valid (mean={mean_val:.1f})")
+                else:
+                    print(f"    Frame {i+1}: Invalid mean ({mean_val:.1f})")
+            else:
+                print(f"    Frame {i+1}: Failed (ret={ret})")
+            time.sleep(0.05)  # Longer delay between validation frames
+        
+        print(f"  Device {device} ({backend_name}): {good}/10 valid frames")
+        
+        if good >= 3:  # Only need 3 valid frames instead of 2
+            print(f"  SUCCESS: Using device {device} with backend {backend_name}")
+            return cap
+            
         cap.release()
         return None
 
@@ -76,17 +111,31 @@ def open_camera():
                 return cap
 
     # Last resort: default backend
+    print("Trying default backend as last resort...")
     for device in devices:
         cap = try_open(device, cv2.CAP_ANY, 0.6)
         if cap:
             return cap
+    
+    print("ERROR: Could not open any camera device!")
     return None
 
 def warmup_camera(cap, frames=20):
-    for _ in range(frames):
-        cap.read()
+    """Warmup camera and verify it's producing valid frames"""
+    valid_frames = 0
+    for i in range(frames):
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            valid_frames += 1
+            print(f"  Warmup frame {i+1}/{frames}: Valid (shape={frame.shape})")
+        else:
+            print(f"  Warmup frame {i+1}/{frames}: Failed (ret={ret})")
+        time.sleep(0.02)
+    
     time.sleep(0.3)
-    return True
+    success = valid_frames >= 3  # Only need at least 3 valid frames
+    print(f"Camera warmup: {valid_frames}/{frames} valid frames, success={success}")
+    return success
 
 #### If these directories don't exist, create them
 if not os.path.isdir('Attendance'):
@@ -95,20 +144,17 @@ if not os.path.isdir('static'):
     os.makedirs('static')
 if not os.path.isdir('static/faces'):
     os.makedirs('static/faces')
-if f'Attendance-{datetoday}.csv' not in os.listdir('Attendance'):
-    with open(f'Attendance/Attendance-{datetoday}.csv','w') as f:
-        f.write('Name,Roll,Time')
+# Attendance is persisted in PostgreSQL (single source of truth)
 
 def initialize_database():
     with app.app_context():
         db.create_all()
         default_admin = Admin.query.filter_by(username='admin').first()
         if default_admin is None:
-            default_admin = Admin(
-                username='admin',
-                password=hashlib.sha256('admin123'.encode()).hexdigest(),
-                email='admin@example.com',
-            )
+            default_admin = Admin()
+            default_admin.username = 'admin'
+            default_admin.password = hashlib.sha256('admin123'.encode()).hexdigest()
+            default_admin.email = 'admin@example.com'
             db.session.add(default_admin)
             db.session.commit()
 
@@ -130,7 +176,10 @@ def create_user(username, password, email):
     if Admin.query.filter_by(username=username).first() is not None:
         return False
 
-    user = Admin(username=username, password=hash_password(password), email=email)
+    user = Admin()
+    user.username = username
+    user.password = hash_password(password)
+    user.email = email
     db.session.add(user)
     db.session.commit()
     return True
@@ -204,6 +253,42 @@ def debug_folders():
     debug_info = debug_users_folders()
     return render_template('debug.html', debug_info=debug_info)
 
+@app.route('/test_camera')
+@login_required
+def test_camera():
+    """Test camera and display diagnostic information"""
+    debug_info = []
+    
+    try:
+        debug_info.append("=== Camera Test Started ===")
+        cap = open_camera()
+        
+        if cap is None:
+            debug_info.append("ERROR: Camera could not be opened!")
+            return render_template('debug.html', debug_info=debug_info)
+        
+        debug_info.append("SUCCESS: Camera opened!")
+        
+        # Test frame capture
+        debug_info.append("\n=== Testing Frame Capture ===")
+        for i in range(10):
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                debug_info.append(f"Frame {i+1}: SUCCESS - Shape: {frame.shape}, Mean: {frame.mean():.2f}")
+            else:
+                debug_info.append(f"Frame {i+1}: FAILED - ret={ret}, frame is None: {frame is None}")
+            time.sleep(0.1)
+        
+        cap.release()
+        debug_info.append("\n=== Camera Test Completed ===")
+        
+    except Exception as e:
+        debug_info.append(f"ERROR: {str(e)}")
+        import traceback
+        debug_info.append(traceback.format_exc())
+    
+    return render_template('debug.html', debug_info=debug_info)
+
 def extract_faces(img):
     if img is not None:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -234,159 +319,166 @@ def preprocess_face(face):
         print(f"Error preprocessing face: {str(e)}")
         return None
 
-#### Identify face using ML model
-def identify_face(facearray):
+#### Identify face using face_recognition encodings
+
+def _load_encoding_store():
+    model_path = 'static/face_recognition_model.pkl'
+    if not os.path.exists(model_path):
+        return [], []
+
+    data = joblib.load(model_path)
+    if isinstance(data, dict):
+        encodings = data.get('encodings', [])
+        names = data.get('names', [])
+        return encodings, names
+
+    # Backward compatibility with legacy model format
+    return [], []
+
+
+def recognize_face(face_encoding, known_encodings, known_names):
+    if len(known_encodings) == 0:
+        return "unknown", 1.0, False
+
+    distances = face_recognition.face_distance(known_encodings, face_encoding)
+
+    user_to_distances = defaultdict(list)
+    for d, user in zip(distances, known_names):
+        user_to_distances[user].append(float(d))
+
+    if not user_to_distances:
+        return "unknown", 1.0, False
+
+    user_scores = {}
+    for user, dists in user_to_distances.items():
+        dists_sorted = sorted(dists)
+        k = min(TOP_K_PER_USER, len(dists_sorted))
+        user_scores[user] = float(np.mean(dists_sorted[:k]))
+
+    best_user = min(user_scores, key=lambda x: user_scores[x])
+    best_score = user_scores[best_user]
+
+    sorted_scores = sorted(user_scores.values())
+    second_score = sorted_scores[1] if len(sorted_scores) > 1 else 1.0
+    margin_ok = (second_score - best_score) >= AMBIGUITY_MARGIN
+
+    if best_score <= STRICT_THRESHOLD and margin_ok:
+        return best_user, best_score, True
+
+    return "unknown", best_score, False
+
+
+def identify_face(face_encoding):
     try:
-        # Load model
-        model_path = 'static/face_recognition_model.pkl'
-        if not os.path.exists(model_path):
-            print("Model file doesn't exist!")
-            return "unknown", 999.0
-            
-        model = joblib.load(model_path)
-        
-        # Ensure proper normalization
-        if facearray.max() > 1.0:
-            facearray = facearray.astype('float32') / 255.0
-        
-        # Get all registered users
-        registered_users = [f for f in os.listdir('static/faces') if os.path.isdir(f'static/faces/{f}')]
-        if len(registered_users) == 0:
-            return "unknown", 999.0
-        
-        # Recognition threshold (lower is stricter). Using the more lenient value we had when marked attendance was working.
-        threshold = 14.0
-        distances, indices = model.kneighbors(facearray)
-        nearest_distance = distances[0][0]
-        
-        print(f"Recognition distance: {nearest_distance}")
-        
-        # If distance is too high, mark as unknown
-        if nearest_distance > threshold:
-            return "unknown", nearest_distance
-            
-        # Get prediction
-        pred = model.predict(facearray)
-        return pred[0], nearest_distance
+        known_encodings, known_names = _load_encoding_store()
+        return recognize_face(face_encoding, known_encodings, known_names)
     except Exception as e:
         print(f"Error in face recognition: {str(e)}")
-        return "unknown", 999.0
+        return "unknown", 1.0, False
 
-#### A function which trains the model on all the faces available in faces folder
+
+#### Build encoding store from all faces in dataset
 def train_model():
     try:
-        faces = []
-        labels = []
+        known_face_encodings = []
+        known_face_names = []
         userlist = os.listdir('static/faces')
-        
-        # Ensure we have users to train on
+
         if len(userlist) == 0:
             print("No users to train on!")
             return False
-            
+
         for user in userlist:
             user_folder = f'static/faces/{user}'
             if not os.path.isdir(user_folder):
                 continue
-                
-            image_files = os.listdir(user_folder)
+
+            image_files = [f for f in os.listdir(user_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
             if len(image_files) == 0:
                 print(f"No images for user {user}")
                 continue
-                
+
             print(f"Training on {len(image_files)} images for {user}")
-            
             for imgname in image_files:
-                if not imgname.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    continue
-                    
                 img_path = f'{user_folder}/{imgname}'
-                img = cv2.imread(img_path)
-                
-                if img is None:
-                    print(f"Could not read image: {img_path}")
-                    continue
-                    
-                # Apply same preprocessing as during recognition
-                processed_face = preprocess_face(img)
-                if processed_face is None:
-                    continue
-                    
-                # Flatten the face image into a 1D array
-                faces.append(processed_face.ravel())
-                labels.append(user)
-        
-        if len(faces) == 0:
-            print("No faces found for training!")
+                try:
+                    image = face_recognition.load_image_file(img_path)
+                    locations = face_recognition.face_locations(image, model='hog', number_of_times_to_upsample=1)
+                    encodings = face_recognition.face_encodings(image, locations)
+                    if len(encodings) == 0:
+                        print(f"No face encoding found: {img_path}")
+                        continue
+
+                    # Store first face encoding from each image
+                    known_face_encodings.append(encodings[0])
+                    known_face_names.append(user)
+                except Exception as ex:
+                    print(f"Failed to encode {img_path}: {ex}")
+
+        if len(known_face_encodings) == 0:
+            print("No valid face encodings found for training!")
             return False
-            
-        # Convert to numpy arrays
-        faces = np.array(faces)
-        
-        # Create and train model
-        # Use 1-NN for exact matching
-        from sklearn.neighbors import KNeighborsClassifier
-        knn = KNeighborsClassifier(n_neighbors=1, weights='uniform')
-        knn.fit(faces, labels)
-        
-        # Save the model
-        joblib.dump(knn, 'static/face_recognition_model.pkl')
-        
-        print(f"Model trained successfully with {len(faces)} images from {len(set(labels))} users")
+
+        data = {
+            'encodings': known_face_encodings,
+            'names': known_face_names,
+            'threshold': STRICT_THRESHOLD,
+            'updated_at': datetime.now().isoformat()
+        }
+        joblib.dump(data, 'static/face_recognition_model.pkl')
+        print(f"Encoding store saved with {len(known_face_encodings)} samples from {len(set(known_face_names))} users")
         return True
     except Exception as e:
         print(f"Error training model: {str(e)}")
         return False
 
-#### Extract info from today's attendance file in attendance folder
+#### Extract today's attendance from PostgreSQL (single source of truth)
 def extract_attendance():
     try:
-        from datetime import date
-        datetoday = date.today().strftime("%m_%d_%y")
-        filename = f'Attendance/Attendance-{datetoday}.csv'
-        
-        if not os.path.exists(filename):
-            return [], [], [], 0
-            
-        df = pd.read_csv(filename)
-        names = df['Name'].tolist()
-        rolls = df['Roll'].tolist()
-        times = df['Time'].tolist()
-        l = len(df)
-        
-        return names, rolls, times, l
+        today = date.today()
+        rows = (
+            db.session.query(Student.name, Student.roll_no, Attendance.time)
+            .join(Attendance, Attendance.student_id == Student.id)
+            .filter(Attendance.date == today)
+            .order_by(Attendance.time.asc())
+            .all()
+        )
+
+        names = [r[0] for r in rows]
+        rolls = [str(r[1]) for r in rows]
+        times = [r[2].strftime("%H:%M:%S") if r[2] else "" for r in rows]
+        return names, rolls, times, len(rows)
     except Exception as e:
-        print(f"Error extracting attendance: {str(e)}")
+        print(f"Error extracting attendance from DB: {str(e)}")
         return [], [], [], 0
 
-#### Add Attendance of a specific user
+#### Add attendance of a specific user (DB-only)
 def add_attendance(name, roll):
     try:
-        from datetime import datetime
-        datetoday = datetime.now().strftime("%m_%d_%y")
-        filename = f'Attendance/Attendance-{datetoday}.csv'
-
-        student = Student.query.filter_by(roll_no=str(roll)).first()
-        if student is None:
-            student = save_student_with_encoding(str(roll), name, department="General")
-
-        _, created = mark_attendance(student.id)
-        if not created:
-            print(f"Attendance already marked for {name}_{roll}")
+        if not name or str(name).strip().lower() == "unknown":
+            print("Skipping unknown face - name is unknown")
             return False
 
-        if not os.path.exists(filename):
-            with open(filename, 'w') as f:
-                f.write('Name,Roll,Time')
+        name = str(name).strip()
+        roll = str(roll).strip()
 
-        current_time = datetime.now().strftime("%H:%M:%S")
-        with open(filename, 'a') as f:
-            f.write(f'\n{name},{roll},{current_time}')
+        with app.app_context():
+            student = Student.query.filter_by(roll_no=roll).first()
+            if student is None:
+                student = save_student_with_encoding(roll, name, department="General")
 
-        print(f"Attendance marked for {name}_{roll}")
-        return True
+            record, created = mark_attendance(student.id)
+            if created:
+                print(f"✓ Attendance recorded in PostgreSQL for {name}_{roll}")
+                return True
+
+            print(f"Attendance already marked for {name}_{roll} today")
+            return False
+
     except Exception as e:
-        print(f"Error adding attendance: {str(e)}")
+        print(f"✗ Error adding attendance: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 ################## ROUTING FUNCTIONS ##############################
@@ -421,9 +513,18 @@ def start():
                                   datetoday2=datetoday2, mess=message)
 
         print("Warming up camera...")
-        warmup_ok = warmup_camera(cap, frames=50)
+        warmup_ok = warmup_camera(cap, frames=30)  # Reduced from 50 to 30
+        if not warmup_ok:
+            message = "Camera warmup failed - camera not producing valid frames. Please check camera connection."
+            print(message)
+            cap.release()
+            registered_users = get_registered_users()
+            return render_template('home.html', names=[], rolls=[], times=[], l=0, 
+                                  registered_users=registered_users, totalreg=totalreg(), 
+                                  datetoday2=datetoday2, mess=message)
+        
         time.sleep(0.2)
-        print("Camera ready!" if warmup_ok else "Camera warmup had no successful frames")
+        print("Camera ready! Starting attendance loop...")
         
         # Check if we have registered users
         if totalreg() == 0:
@@ -459,82 +560,87 @@ def start():
         # Main attendance loop (supports multiple faces)
         consecutive_fail = 0
         frame_count = 0
-        last_predictions = []  # Cache predictions for smoother display
-        
+        last_unknown_log_ts = 0.0
+
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
                 message = "Failed to capture frame from camera"
-                print(message)
+                print(f"Frame read failed: ret={ret}, frame is None: {frame is None}")
                 consecutive_fail += 1
-                if consecutive_fail > 15:
+                if consecutive_fail > 30:  # Increased threshold
+                    message = f"Camera connection lost after {consecutive_fail} failed attempts. Please check camera connection and try again."
+                    print(message)
                     break
-                time.sleep(0.01)
+                time.sleep(0.05)  # Longer sleep between retries
                 continue
+
+            # Validate frame
+            if frame.size == 0 or frame.shape[0] < 10 or frame.shape[1] < 10:
+                print(f"Invalid frame dimensions: {frame.shape if frame is not None else 'None'}")
+                consecutive_fail += 1
+                if consecutive_fail > 30:
+                    message = "Camera producing invalid frames. Please restart the application."
+                    break
+                time.sleep(0.05)
+                continue
+
             consecutive_fail = 0
             frame_count += 1
 
-            # Detect faces only every 2nd frame to improve speed while keeping responsiveness
+            # Per-frame reset to avoid cross-face contamination
+            recognized_names = []
             predictions = []
-            if frame_count % 2 == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                # Optimized face detection: faster parameters
-                faces = face_detector.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4, 
-                                                       flags=cv2.CASCADE_SCALE_IMAGE)
 
-                # Collect predictions for all faces in the frame
-                if len(faces) > 0:
-                    for (x, y, w, h) in faces:
-                        # Skip very small faces to reduce false positives
-                        if w < 50 or h < 50:
-                            continue
+            small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            face_locations = face_recognition.face_locations(
+                rgb_small,
+                model="hog",
+                number_of_times_to_upsample=2
+            )
+            face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
 
-                        # Draw rectangle around each face
-                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            # Stable left-to-right ordering prevents identity jumping between faces
+            face_pairs = sorted(zip(face_locations, face_encodings), key=lambda p: p[0][3])
 
-                        # Expand ROI slightly to capture whole face
-                        y_margin = int(h * 0.1)
-                        x_margin = int(w * 0.1)
-                        y1 = max(0, y - y_margin)
-                        y2 = min(frame.shape[0], y + h + y_margin)
-                        x1 = max(0, x - x_margin)
-                        x2 = min(frame.shape[1], x + w + x_margin)
-                        face_roi = frame[y1:y2, x1:x2]
+            for (top, right, bottom, left), face_encoding in face_pairs:
+                # Scale coordinates back to original frame
+                top = int(top * 2)
+                right = int(right * 2)
+                bottom = int(bottom * 2)
+                left = int(left * 2)
+                w = right - left
+                h = bottom - top
 
-                        label_text = "Unknown"
-                        distance = 999.0
-                        person = "unknown"
-                        if face_roi is not None and face_roi.size > 0:
-                            processed_face = preprocess_face(face_roi)
-                            if processed_face is not None:
-                                person, distance = identify_face(processed_face.reshape(1, -1))
-                                if person != "unknown" and '_' in person:
-                                    name, roll = person.rsplit('_', 1)
-                                    label_text = f"{name} (ID: {roll})"
+                # Independent state for each face
+                person = "unknown"
+                distance = 1.0
 
-                        # Draw per-face label above the head
-                        cv2.putText(frame, label_text, (x, max(0, y - 10)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                                    (0, 255, 0) if person != "unknown" else (0, 0, 255), 2)
+                if w >= MIN_FACE_SIZE and h >= MIN_FACE_SIZE:
+                    raw_person, distance, is_known = identify_face(face_encoding)
+                    if is_known:
+                        person = raw_person
+                        recognized_names.append(person)
 
-                        predictions.append((x, y, w, h, person, distance))
-                
-                # Update cached predictions
-                last_predictions = predictions
-            else:
-                # Use cached predictions on frames where we don't detect
-                predictions = last_predictions
-                # Redraw cached boxes
-                for (x, y, w, h, person, distance) in predictions:
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    if person != "unknown" and '_' in person:
-                        name, roll = person.rsplit('_', 1)
-                        label_text = f"{name} (ID: {roll})"
-                    else:
-                        label_text = "Unknown"
-                    cv2.putText(frame, label_text, (x, max(0, y - 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                                (0, 255, 0) if person != "unknown" else (0, 0, 255), 2)
+                color = (0, 255, 0) if person != "unknown" else (0, 0, 255)
+                cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+
+                if person != "unknown" and '_' in person:
+                    name, roll = person.rsplit('_', 1)
+                    label_text = f"{name} (ID: {roll}) Confidence: {distance:.2f}"
+                elif person != "unknown":
+                    label_text = f"{person} Confidence: {distance:.2f}"
+                else:
+                    label_text = "Unknown Person Detected"
+                    now_ts = time.time()
+                    if now_ts - last_unknown_log_ts >= UNKNOWN_LOG_COOLDOWN_SEC:
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Unknown face detected")
+                        last_unknown_log_ts = now_ts
+
+                cv2.putText(frame, label_text, (left, max(20, top - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                predictions.append((left, top, w, h, person, distance))
 
             # Show instruction text once per frame
             cv2.putText(frame, "Press 'a' to mark ALL visible faces", (30, 30),
@@ -945,23 +1051,28 @@ def retrain_model():
 @login_required
 def download_today_csv():
     try:
-        today_key = date.today().strftime("%m_%d_%y")
-        folder = 'Attendance'
-        filename = f'Attendance-{today_key}.csv'
-        full_path = os.path.join(folder, filename)
+        # Export today's DB attendance as CSV (generated on the fly, no file dependency)
+        today = date.today()
+        rows = (
+            db.session.query(Student.name, Student.roll_no, Attendance.date, Attendance.time)
+            .join(Attendance, Attendance.student_id == Student.id)
+            .filter(Attendance.date == today)
+            .order_by(Attendance.time.asc())
+            .all()
+        )
 
-        if not os.path.exists(full_path):
-            # Render home with a friendly message if file missing
-            names, rolls, times, l = extract_attendance()
-            registered_users = get_registered_users()
-            return render_template('home.html', names=names, rolls=rolls, times=times, l=l,
-                                   registered_users=registered_users, totalreg=totalreg(),
-                                   datetoday2=datetoday2, mess="No attendance file for today yet.")
+        output = ["Name,Roll,Date,Time"]
+        for name, roll, att_date, att_time in rows:
+            output.append(f"{name},{roll},{att_date.strftime('%Y-%m-%d')},{att_time.strftime('%H:%M:%S') if att_time else ''}")
 
-        # Serve the CSV (inline view in browser)
-        return send_from_directory(folder, filename, as_attachment=False)
+        csv_data = "\n".join(output)
+        return Response(
+            csv_data,
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"inline; filename=attendance-{today.strftime('%Y-%m-%d')}.csv"}
+        )
     except Exception as e:
-        print(f"Error serving today's CSV: {str(e)}")
+        print(f"Error serving today's attendance CSV from DB: {str(e)}")
         return redirect(url_for('home'))
 
 #### Our main function which runs the Flask App
