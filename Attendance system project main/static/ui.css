@@ -117,7 +117,7 @@ body{
 .page-fade{animation:fadeIn .55s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 
-main.container{max-width:1380px;position:relative;z-index:2;padding-bottom:120px}
+main.container{max-width:1380px;position:relative;z-index:2;padding-top:80px;padding-bottom:120px}
 .cursor-glow{position:fixed;width:360px;height:360px;border-radius:50%;pointer-events:none;z-index:1;left:50%;top:50%;transform:translate(-50%,-50%);background:radial-gradient(circle,rgba(96,165,250,.22),rgba(124,58,237,.14) 35%,transparent 68%);filter:blur(12px)}
 .card-ui.p-3,.card-ui.p-4{padding:1.25rem 1.35rem!important}
 .d-grid .btn{padding:.8rem 1rem;font-weight:700}
@@ -153,14 +153,14 @@ main.container{max-width:1380px;position:relative;z-index:2;padding-bottom:120px
 @keyframes particleFloat{0%{transform:translateY(0) scale(1)}50%{transform:translateY(-22px) scale(1.25)}100%{transform:translateY(0) scale(1)}}
 @keyframes camFloat{0%,100%{transform:translateY(0) rotate(-11deg)}50%{transform:translateY(-10px) rotate(-14deg)}}
 
-.corner-hud{position:fixed;z-index:3;font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:#c7d2fe;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.35);backdrop-filter:blur(8px);padding:7px 10px;border-radius:10px}
-.top-left{top:78px;left:16px}
-.top-right{top:78px;right:16px}
+.corner-hud{position:fixed;z-index:3;font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:#c7d2fe;background:rgba(15,23,42,.55);border:1px solid rgba(148,163,184,.35);backdrop-filter:blur(8px);padding:8px 12px;border-radius:12px;white-space:nowrap;transform:none}
+.top-left{top:20px;left:20px}
+.top-right{top:20px;right:20px}
 .dot-live{display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:8px;box-shadow:0 0 10px #22c55e;animation:pulseDot 1.4s ease-in-out infinite}
 
 .corner-bracket{position:fixed;width:34px;height:34px;z-index:2;opacity:.65}
-.br-tl{top:110px;left:12px;border-top:2px solid #60a5fa;border-left:2px solid #60a5fa}
-.br-tr{top:110px;right:12px;border-top:2px solid #a78bfa;border-right:2px solid #a78bfa}
+.br-tl{top:50px;left:12px;border-top:2px solid #60a5fa;border-left:2px solid #60a5fa}
+.br-tr{top:50px;right:12px;border-top:2px solid #a78bfa;border-right:2px solid #a78bfa}
 .br-bl{bottom:12px;left:12px;border-bottom:2px solid #60a5fa;border-left:2px solid #60a5fa}
 .br-br{bottom:12px;right:12px;border-bottom:2px solid #a78bfa;border-right:2px solid #a78bfa}
 @keyframes pulseDot{0%,100%{opacity:.45}50%{opacity:1}}
@@ -170,6 +170,7 @@ main.container{max-width:1380px;position:relative;z-index:2;padding-bottom:120px
 .scroll-fx{will-change:filter,opacity;transition:filter .16s linear,opacity .16s linear;transform:none!important}
 
 @media (max-width:768px){
+  main.container{padding-top:70px}
   .stat-card{min-height:140px;padding:18px}
   .stat-num{font-size:2rem}
   .drone-cam{display:none}

@@ -12,6 +12,9 @@ from functools import wraps
 import hashlib
 import csv
 from collections import deque, Counter, defaultdict
+import threading
+from queue import Queue
+from sqlalchemy import text
 
 from database import init_db_config, db
 from models import Admin, Student, Attendance
@@ -27,6 +30,18 @@ PREDICTION_BUFFER_SIZE = int(os.environ.get('FACE_PREDICTION_BUFFER', '5'))
 CONFIRM_FRAMES = int(os.environ.get('FACE_CONFIRM_FRAMES', '3'))
 MAX_MISSES_BEFORE_RESET = int(os.environ.get('FACE_MAX_MISSES', '8'))
 UNKNOWN_LOG_COOLDOWN_SEC = float(os.environ.get('FACE_UNKNOWN_LOG_COOLDOWN', '3'))
+
+#### PERFORMANCE OPTIMIZATION SETTINGS FOR LOW-END DEVICES
+FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '3'))  # Process every 3rd frame (improves FPS 3x)
+FACE_DETECTION_SCALE = float(os.environ.get('FACE_DETECTION_SCALE', '0.4'))  # Lower resolution for detection
+FACE_DETECTION_UPSAMPLE = int(os.environ.get('FACE_DETECTION_UPSAMPLE', '1'))  # Reduced from 2 to 1
+MODEL_CACHE_ENABLED = os.environ.get('MODEL_CACHE_ENABLED', 'true').lower() == 'true'
+
+# Global model cache (loaded once, reused for all frames)
+_ENCODING_CACHE = None
+_ENCODING_CACHE_TIMESTAMP = 0
+_ENCODING_CACHE_LOCK = threading.Lock()
+_CACHE_EXPIRY_SECONDS = 300  # Refresh cache every 5 minutes
 
 #### Defining Flask App
 app = Flask(__name__)
@@ -149,6 +164,26 @@ if not os.path.isdir('static/faces'):
 def initialize_database():
     with app.app_context():
         db.create_all()
+
+        # Ensure attendance table has direct student detail columns for pgAdmin table view.
+        db.session.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS student_name VARCHAR(255)"))
+        db.session.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS roll_no VARCHAR(64)"))
+        db.session.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS department VARCHAR(255)"))
+        db.session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_student_date ON attendance (student_id, date)"))
+
+        # Backfill existing attendance rows from students table.
+        db.session.execute(text("""
+            UPDATE attendance a
+            SET student_name = s.name,
+                roll_no = s.roll_no,
+                department = s.department
+            FROM students s
+            WHERE a.student_id = s.id
+              AND (a.student_name IS NULL OR a.roll_no IS NULL OR a.department IS NULL)
+        """))
+
+        db.session.commit()
+
         default_admin = Admin.query.filter_by(username='admin').first()
         if default_admin is None:
             default_admin = Admin()
@@ -322,18 +357,54 @@ def preprocess_face(face):
 #### Identify face using face_recognition encodings
 
 def _load_encoding_store():
-    model_path = 'static/face_recognition_model.pkl'
-    if not os.path.exists(model_path):
+    """Load encoding store with caching for better performance on low-end devices"""
+    global _ENCODING_CACHE, _ENCODING_CACHE_TIMESTAMP
+    
+    if not MODEL_CACHE_ENABLED:
+        # Original behavior: load from disk every time (slower)
+        model_path = 'static/face_recognition_model.pkl'
+        if not os.path.exists(model_path):
+            return [], []
+        data = joblib.load(model_path)
+        if isinstance(data, dict):
+            encodings = data.get('encodings', [])
+            names = data.get('names', [])
+            return encodings, names
         return [], []
-
-    data = joblib.load(model_path)
-    if isinstance(data, dict):
-        encodings = data.get('encodings', [])
-        names = data.get('names', [])
-        return encodings, names
-
-    # Backward compatibility with legacy model format
-    return [], []
+    
+    # Optimized: use cache with expiry
+    current_time = time.time()
+    
+    with _ENCODING_CACHE_LOCK:
+        # Check if cache is valid
+        if (_ENCODING_CACHE is not None and 
+            current_time - _ENCODING_CACHE_TIMESTAMP < _CACHE_EXPIRY_SECONDS):
+            return _ENCODING_CACHE
+        
+        # Cache miss or expired - reload
+        model_path = 'static/face_recognition_model.pkl'
+        if not os.path.exists(model_path):
+            _ENCODING_CACHE = ([], [])
+            _ENCODING_CACHE_TIMESTAMP = current_time
+            return [], []
+        
+        try:
+            data = joblib.load(model_path)
+            if isinstance(data, dict):
+                encodings = data.get('encodings', [])
+                names = data.get('names', [])
+                _ENCODING_CACHE = (encodings, names)
+                _ENCODING_CACHE_TIMESTAMP = current_time
+                return encodings, names
+        except Exception as e:
+            print(f"Error loading encoding cache: {e}")
+            _ENCODING_CACHE = ([], [])
+            _ENCODING_CACHE_TIMESTAMP = current_time
+            return [], []
+        
+        _ENCODING_CACHE = ([], [])
+        _ENCODING_CACHE_TIMESTAMP = current_time
+        return [], []
 
 
 def recognize_face(face_encoding, known_encodings, known_names):
@@ -403,7 +474,7 @@ def train_model():
                 img_path = f'{user_folder}/{imgname}'
                 try:
                     image = face_recognition.load_image_file(img_path)
-                    locations = face_recognition.face_locations(image, model='hog', number_of_times_to_upsample=1)
+                    locations = face_recognition.face_locations(image, model='hog', number_of_times_to_upsample=FACE_DETECTION_UPSAMPLE)
                     encodings = face_recognition.face_encodings(image, locations)
                     if len(encodings) == 0:
                         print(f"No face encoding found: {img_path}")
@@ -467,7 +538,12 @@ def add_attendance(name, roll):
             if student is None:
                 student = save_student_with_encoding(roll, name, department="General")
 
-            record, created = mark_attendance(student.id)
+            record, created = mark_attendance(
+                student.id,
+                student_name=student.name,
+                roll_no=student.roll_no,
+                department=student.department,
+            )
             if created:
                 print(f"✓ Attendance recorded in PostgreSQL for {name}_{roll}")
                 return True
@@ -561,6 +637,10 @@ def start():
         consecutive_fail = 0
         frame_count = 0
         last_unknown_log_ts = 0.0
+        last_predictions = []  # Cache recent predictions for smooth display
+        fps_timer = time.time()
+        fps_counter = 0
+        current_fps = 0.0
 
         while True:
             ret, frame = cap.read()
@@ -592,24 +672,33 @@ def start():
             recognized_names = []
             predictions = []
 
-            small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-            rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-            face_locations = face_recognition.face_locations(
-                rgb_small,
-                model="hog",
-                number_of_times_to_upsample=2
-            )
-            face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
+            # OPTIMIZATION: Only process face detection every Nth frame (skip frames for low-end devices)
+            should_detect_faces = (frame_count % FRAME_SKIP) == 0
+            
+            if should_detect_faces:
+                # Optimized face detection with lower resolution and reduced upsampling
+                small_frame = cv2.resize(frame, (0, 0), fx=FACE_DETECTION_SCALE, fy=FACE_DETECTION_SCALE)
+                rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+                face_locations = face_recognition.face_locations(
+                    rgb_small,
+                    model="hog",
+                    number_of_times_to_upsample=FACE_DETECTION_UPSAMPLE
+                )
+                face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
 
-            # Stable left-to-right ordering prevents identity jumping between faces
-            face_pairs = sorted(zip(face_locations, face_encodings), key=lambda p: p[0][3])
+                # Stable left-to-right ordering prevents identity jumping between faces
+                face_pairs = sorted(zip(face_locations, face_encodings), key=lambda p: p[0][3])
+                
+                # Scale coordinates back to original frame size
+                scale_factor = 1.0 / FACE_DETECTION_SCALE
+                face_pairs = [((int(top * scale_factor), int(right * scale_factor), 
+                               int(bottom * scale_factor), int(left * scale_factor)), encoding)
+                             for (top, right, bottom, left), encoding in face_pairs]
+            else:
+                # Reuse predictions from previous frame to maintain smooth display
+                face_pairs = []
 
             for (top, right, bottom, left), face_encoding in face_pairs:
-                # Scale coordinates back to original frame
-                top = int(top * 2)
-                right = int(right * 2)
-                bottom = int(bottom * 2)
-                left = int(left * 2)
                 w = right - left
                 h = bottom - top
 
@@ -642,16 +731,34 @@ def start():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 predictions.append((left, top, w, h, person, distance))
 
+            # Cache predictions for smooth display even when skipping frames
+            if should_detect_faces and predictions:
+                last_predictions = predictions
+
             # Show instruction text once per frame
             cv2.putText(frame, "Press 'a' to mark ALL visible faces", (30, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            
+            # Display FPS counter for performance monitoring
+            fps_counter += 1
+            elapsed = time.time() - fps_timer
+            if elapsed >= 1.0:
+                current_fps = fps_counter / elapsed
+                fps_timer = time.time()
+                fps_counter = 0
+            
+            fps_text = f"FPS: {current_fps:.1f} | Processing: {'YES' if should_detect_faces else 'NO (cached)'}"
+            cv2.putText(frame, fps_text, (30, frame.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
             # Process key press (single press marks multiple faces)
             key = cv2.waitKey(1)
             if key == ord('a'):
                 marked_count = 0
                 already_marked_count = 0
-                for (x, y, w, h, person, distance) in predictions:
+                # Use cached predictions if current detection didn't find faces
+                active_predictions = predictions if predictions else last_predictions
+                for (x, y, w, h, person, distance) in active_predictions:
                     if person == "unknown":
                         # Optional: indicate unknown
                         cv2.putText(frame, f"Unknown (d={distance:.2f})", (x, max(0, y - 30)),

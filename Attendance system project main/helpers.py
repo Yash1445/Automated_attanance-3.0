@@ -49,14 +49,39 @@ def save_student_with_encoding(roll_no, name, department="General", folder_path=
     return student
 
 
-def mark_attendance(student_id, status="Present"):
+def mark_attendance(student_id, status="Present", student_name=None, roll_no=None, department=None):
+    if student_id is None:
+        raise ValueError("student_id is required to mark attendance")
+
+    student = Student.query.get(student_id)
+    if student is None:
+        raise ValueError(f"Student not found for id={student_id}")
+
     today = datetime.now().date()
     existing = Attendance.query.filter_by(student_id=student_id, date=today).first()
     if existing:
+        resolved_name = student_name or student.name
+        resolved_roll = str(roll_no) if roll_no is not None else str(student.roll_no)
+        resolved_department = department or student.department
+
+        if resolved_name and not existing.student_name:
+            existing.student_name = resolved_name
+        if resolved_roll and not existing.roll_no:
+            existing.roll_no = resolved_roll
+        if resolved_department and not existing.department:
+            existing.department = resolved_department
+        db.session.commit()
         return existing, False
+
+    resolved_name = student_name or student.name
+    resolved_roll = str(roll_no) if roll_no is not None else str(student.roll_no)
+    resolved_department = department or student.department
 
     record = Attendance(
         student_id=student_id,
+        student_name=resolved_name,
+        roll_no=resolved_roll,
+        department=resolved_department,
         date=today,
         time=datetime.now().time(),
         status=status,

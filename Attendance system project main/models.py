@@ -27,6 +27,10 @@ class Attendance(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     student_id = db.Column(db.Integer, db.ForeignKey("students.id"), nullable=False, index=True)
+    # Snapshot columns so admins can view student details directly in attendance table
+    student_name = db.Column(db.String(255), nullable=True)
+    roll_no = db.Column(db.String(64), nullable=True, index=True)
+    department = db.Column(db.String(255), nullable=True)
     date = db.Column(db.Date, nullable=False, default=date.today)
     time = db.Column(db.Time, nullable=False, default=lambda: datetime.now().time())
     status = db.Column(db.String(20), nullable=False, default="Present")
