@@ -1,7 +1,7 @@
-import cv2  # type: ignore
+import cv2  
 import os
 import numpy as np
-#import face_recognition
+import face_recognition
 from flask import Flask, request, render_template, redirect, url_for, session, flash, Response
 from datetime import date, datetime
 import pandas as pd
@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 from database import init_db_config, db
 from models import Admin, Student, Attendance
-#from helpers import save_student_with_encoding, mark_attendance
+from helpers import save_student_with_encoding, mark_attendance
 
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
@@ -44,10 +44,20 @@ _ENCODING_CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRY_SECONDS = 300  # Refresh cache every 5 minutes
 
 #### Defining Flask App
-app = Flask(__name__)
-app.secret_key = 'your-secret-key-here-change-this-in-production'  # Change this to a random secret key
-init_db_config(app)
+from flask import Flask
+from flask_cors import CORS
 
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-here-change-this-in-production'
+
+init_db_config(app)
+CORS(app)
+
+with app.app_context():
+    db.create_all()
+
+with app.app_context():
+    db.create_all()
 #### Saving Date today in 2 different formats
 datetoday = date.today().strftime("%m_%d_%y")
 datetoday2 = date.today().strftime("%d-%B-%Y")
