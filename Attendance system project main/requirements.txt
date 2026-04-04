@@ -6,3 +6,4 @@ joblib
 sqlalchemy
 flask_sqlalchemy
 opencv-python-headless
+flask-cors
