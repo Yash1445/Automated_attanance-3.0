@@ -5,7 +5,10 @@ from datetime import datetime
 from database import db
 from models import Student, Attendance
 import pickle
-import face_recognition  # type: ignore
+try:
+    import face_recognition
+except:
+    face_recognition = None  # type: ignore
 
 
 def _build_face_encoding_from_folder(folder_path: str):
