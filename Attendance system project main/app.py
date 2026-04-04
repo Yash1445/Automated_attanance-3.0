@@ -599,42 +599,58 @@ def home():
 def start():
     ATTENDANCE_MARKED = False
     message = ""
-    
+
+    # 🚀 BLOCK CAMERA ON RENDER
+    if os.environ.get("RENDER") == "true":
+        message = "⚠️ Camera not supported on cloud. Use local system for attendance."
+        registered_users = get_registered_users()
+        names, rolls, times, l = extract_attendance()
+
+        return render_template(
+            'home.html',
+            names=names,
+            rolls=rolls,
+            times=times,
+            l=l,
+            registered_users=registered_users,
+            totalreg=totalreg(),
+            datetoday2=datetoday2,
+            mess=message
+        )
+
+    # ✅ LOCAL MACHINE CAMERA LOGIC
     try:
-        # Initialize camera using robust opener
         print("Initializing camera...")
         cap = open_camera()
+
         if cap is None:
             message = "Could not access camera"
-            print(message)
             registered_users = get_registered_users()
-            return render_template('home.html', names=[], rolls=[], times=[], l=0, 
-                                  registered_users=registered_users, totalreg=totalreg(), 
-                                  datetoday2=datetoday2, mess=message)
 
-        print("Warming up camera...")
-        warmup_ok = warmup_camera(cap, frames=30)  # Reduced from 50 to 30
-        if not warmup_ok:
-            message = "Camera warmup failed - camera not producing valid frames. Please check camera connection."
-            print(message)
-            cap.release()
-            registered_users = get_registered_users()
-            return render_template('home.html', names=[], rolls=[], times=[], l=0, 
-                                  registered_users=registered_users, totalreg=totalreg(), 
-                                  datetoday2=datetoday2, mess=message)
-        
-        time.sleep(0.2)
-        print("Camera ready! Starting attendance loop...")
-        
-        # Check if we have registered users
-        if totalreg() == 0:
-            message = "No registered users! Please register users first."
-            print(message)
-            cap.release()
-            registered_users = get_registered_users()
-            return render_template('home.html', names=[], rolls=[], times=[], l=0, 
-                                  registered_users=registered_users, totalreg=totalreg(), 
-                                  datetoday2=datetoday2, mess=message)
+            return render_template(
+                'home.html',
+                names=[], rolls=[], times=[], l=0,
+                registered_users=registered_users,
+                totalreg=totalreg(),
+                datetoday2=datetoday2,
+                mess=message
+            )
+
+        # 👉 Continue your existing camera logic here
+
+    except Exception as e:
+        print("Error:", str(e))
+        message = "Error starting camera"
+
+        registered_users = get_registered_users()
+        return render_template(
+            'home.html',
+            names=[], rolls=[], times=[], l=0,
+            registered_users=registered_users,
+            totalreg=totalreg(),
+            datetoday2=datetoday2,
+            mess=message
+        )
         
         # Check if model exists
         if not os.path.exists('static/face_recognition_model.pkl'):
