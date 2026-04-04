@@ -1,3 +1,31 @@
+# 🔹 imports FIRST
+import os
+import base64
+import numpy as np
+import cv2
+
+from flask import Flask, request, render_template, redirect, url_for
+
+# 🔹 create app
+app = Flask(__name__)
+
+# 🔹 your existing setup (db, config, etc)
+init_db_config(app)
+
+# 🔹 THEN routes
+
+@app.route('/api/recognize', methods=['POST'])
+def recognize():
+    data = request.json['image']
+
+    encoded = data.split(",")[1]
+    img_bytes = base64.b64decode(encoded)
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    print("✅ Frame received from frontend")
+
+    return {"status": "received"}
 import cv2  
 import os
 import numpy as np
