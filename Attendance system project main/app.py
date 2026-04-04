@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 from database import init_db_config, db
 from models import Admin, Student, Attendance
-from helpers import save_student_with_encoding, mark_attendance
+#from helpers import save_student_with_encoding, mark_attendance
 
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
