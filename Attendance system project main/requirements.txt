@@ -4,3 +4,4 @@ numpy
 pandas
 joblib
 opencv-python-headless
+sqlalchemy
