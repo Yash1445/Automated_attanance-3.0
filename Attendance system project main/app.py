@@ -51,13 +51,10 @@ from flask import Flask
 from flask_cors import CORS
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here-change-this-in-production'
+app.secret_key = os.environ.get("SECRET_KEY", "fallback-key")
 
 init_db_config(app)
 CORS(app)
-
-with app.app_context():
-    db.create_all()
 
 with app.app_context():
     db.create_all()
@@ -910,8 +907,7 @@ def start():
 def instructions():
     return render_template('attendance_instructions.html')
 
-@app.route('/add', methods=['GET', 'POST'])
-@login_required
+@app.route('/add', methods=['POST'])
 def add():
     try:
         # Get form data
