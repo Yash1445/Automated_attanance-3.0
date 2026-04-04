@@ -3,3 +3,9 @@ opencv-python-headless
 face-recognition
 numpy
 gunicorn
+Flask==3.0.3
+opencv-python-headless
+face-recognition
+dlib-bin
+numpy
+gunicorn
