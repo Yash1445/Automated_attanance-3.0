@@ -829,11 +829,10 @@ def start():
                     message = "No known faces to mark"
 
                 # Show frame with confirmations briefly
-                cv2.imshow('Attendance Check, press "q" to exit', frame)
-                cv2.waitKey(1500)
+                #cv2.imshow('Attendance Check, press "q" to exit', frame)
+                #cv2.waitKey(1500)
 
-            elif key == ord('q'):
-                break
+           
 
             elif len(predictions) == 0 and frame_count % 3 == 0:
                 # No face detected
@@ -841,7 +840,7 @@ def start():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
             # Show frame
-            cv2.imshow('Attendance Check, press "q" to exit', frame)
+            #cv2.imshow('Attendance Check, press "q" to exit', frame)
 
             # Exit is handled in the single key poll above
     
@@ -849,7 +848,6 @@ def start():
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()
-        cv2.waitKey(1)
         
         # Update attendance records
         names, rolls, times, l = extract_attendance()
