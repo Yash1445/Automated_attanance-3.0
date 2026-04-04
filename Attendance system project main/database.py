@@ -1,25 +1,14 @@
-import os
-from urllib.parse import quote_plus
 from flask_sqlalchemy import SQLAlchemy
-from dotenv import load_dotenv
 
-load_dotenv()
-
+# Create database object
 db = SQLAlchemy()
 
-
 def init_db_config(app):
-    db_name = os.getenv("DB_NAME", "attendance_system_db")
-    db_user = os.getenv("DB_USER", "postgres")
-    db_password = os.getenv("DB_PASSWORD", "@Jaatboy9811")
-    db_host = os.getenv("DB_HOST", "localhost")
-    db_port = os.getenv("DB_PORT", "5432")
-
-    encoded_password = quote_plus(db_password)
-
-    app.config["SQLALCHEMY_DATABASE_URI"] = (
-        f"postgresql+psycopg2://{db_user}:{encoded_password}@{db_host}:{db_port}/{db_name}"
-    )
+    # Use SQLite (works on Render without setup)
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///attendance.db"
+    
+    # Disable modification tracking (recommended)
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+    # Initialize DB with Flask app
     db.init_app(app)
