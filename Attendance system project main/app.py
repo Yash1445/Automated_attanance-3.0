@@ -171,41 +171,11 @@ if not os.path.isdir('static/faces'):
     os.makedirs('static/faces')
 # Attendance is persisted in PostgreSQL (single source of truth)
 
-from sqlalchemy import text
-
-from sqlalchemy import text
-
 def initialize_database():
     with app.app_context():
         db.create_all()
 
-        # ✅ Add student_name column safely
-        try:
-            db.session.execute(text(
-                "ALTER TABLE attendance ADD COLUMN student_name VARCHAR(255)"
-            ))
-        except Exception as e:
-            print("student_name column may already exist:", e)
-
-        # ✅ Add roll_no column safely
-        try:
-            db.session.execute(text(
-                "ALTER TABLE attendance ADD COLUMN roll_no VARCHAR(64)"
-            ))
-        except Exception as e:
-            print("roll_no column may already exist:", e)
-
-        # ✅ Create index safely
-        try:
-            db.session.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_student_date ON attendance (student_id, date)"
-            ))
-        except Exception as e:
-            print("Index may already exist:", e)
-
-        # ✅ Commit once at end
-        db.session.commit()
-
+        # create default admin
         default_admin = Admin.query.filter_by(username='admin').first()
         if default_admin is None:
             default_admin = Admin()
