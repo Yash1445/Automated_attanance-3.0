@@ -1,7 +1,10 @@
 import cv2  
 import os
 import numpy as np
-import face_recognition
+try:
+    import face_recognition
+except:
+    face_recognition = None
 from flask import Flask, request, render_template, redirect, url_for, session, flash, Response
 from datetime import date, datetime
 import pandas as pd
