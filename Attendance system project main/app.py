@@ -1,19 +1,20 @@
 # 🔹 imports FIRST
-import os
+# 🔹 ALL IMPORTS FIRST
 import base64
 import numpy as np
 import cv2
 
 from flask import Flask, request, render_template, redirect, url_for
+from flask_cors import CORS
 
-# 🔹 create app
+# 🔹 CREATE APP
 app = Flask(__name__)
+CORS(app)
 
-# 🔹 your existing setup (db, config, etc)
+# 🔹 CONFIG
 init_db_config(app)
 
-# 🔹 THEN routes
-
+# 🔹 ROUTES
 @app.route('/api/recognize', methods=['POST'])
 def recognize():
     data = request.json['image']
@@ -26,9 +27,8 @@ def recognize():
     print("✅ Frame received from frontend")
 
     return {"status": "received"}
-import cv2  
+ 
 import os
-import numpy as np
 try:
     import face_recognition
 except:
