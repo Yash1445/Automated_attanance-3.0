@@ -174,27 +174,39 @@ if not os.path.isdir('static/faces'):
     os.makedirs('static/faces')
 # Attendance is persisted in PostgreSQL (single source of truth)
 
+from sqlalchemy import text
+
+from sqlalchemy import text
+
 def initialize_database():
     with app.app_context():
         db.create_all()
 
-        # Ensure attendance table has direct student detail columns for pgAdmin table view.
-        db.session.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS student_name VARCHAR(255)"))
-        db.session.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS roll_no VARCHAR(64)"))
-        db.session.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS department VARCHAR(255)"))
-        db.session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_student_date ON attendance (student_id, date)"))
+        # ✅ Add student_name column safely
+        try:
+            db.session.execute(text(
+                "ALTER TABLE attendance ADD COLUMN student_name VARCHAR(255)"
+            ))
+        except Exception as e:
+            print("student_name column may already exist:", e)
 
-        # Backfill existing attendance rows from students table.
-        db.session.execute(text("""
-            UPDATE attendance a
-            SET student_name = s.name,
-                roll_no = s.roll_no,
-                department = s.department
-            FROM students s
-            WHERE a.student_id = s.id
-              AND (a.student_name IS NULL OR a.roll_no IS NULL OR a.department IS NULL)
-        """))
+        # ✅ Add roll_no column safely
+        try:
+            db.session.execute(text(
+                "ALTER TABLE attendance ADD COLUMN roll_no VARCHAR(64)"
+            ))
+        except Exception as e:
+            print("roll_no column may already exist:", e)
 
+        # ✅ Create index safely
+        try:
+            db.session.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_attendance_student_date ON attendance (student_id, date)"
+            ))
+        except Exception as e:
+            print("Index may already exist:", e)
+
+        # ✅ Commit once at end
         db.session.commit()
 
         default_admin = Admin.query.filter_by(username='admin').first()
