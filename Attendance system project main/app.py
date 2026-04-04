@@ -3,7 +3,7 @@
 import base64
 import numpy as np
 import cv2
-
+from database import init_db_config, db
 from flask import Flask, request, render_template, redirect, url_for
 from flask_cors import CORS
 
