@@ -20,6 +20,8 @@ class Student(db.Model):
     name = db.Column(db.String(255), nullable=False)
     department = db.Column(db.String(255), nullable=False, default="General")
     face_encoding = db.Column(db.LargeBinary, nullable=True)
+    # Multiple face encodings from multi-angle enrollment (stored as pickled list)
+    face_encodings_multi = db.Column(db.LargeBinary, nullable=True)
 
 
 class Attendance(db.Model):

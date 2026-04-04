@@ -11,7 +11,7 @@ import shutil
 from functools import wraps
 import hashlib
 import csv
-from collections import deque, Counter, defaultdict
+from collections import Counter, defaultdict
 import threading
 from queue import Queue
 from sqlalchemy import text
@@ -241,25 +241,31 @@ def login_required(f):
 
 #### get a number of total registered users
 def totalreg():
-    return len(os.listdir('static/faces'))
+    try:
+        return Student.query.count()
+    except Exception:
+        # Fallback for environments where DB is temporarily unavailable
+        return len(os.listdir('static/faces')) if os.path.isdir('static/faces') else 0
 
 def get_registered_users():
-    users = []
-    faces_dir = 'static/faces'
-    if os.path.exists(faces_dir):
-        for folder in os.listdir(faces_dir):
-            folder_path = os.path.join(faces_dir, folder)
-            # Only process directories, not files
-            if os.path.isdir(folder_path) and '_' in folder:
-                try:
-                    name, user_id = folder.rsplit('_', 1)
-                    users.append({'name': name, 'id': user_id})
-                except ValueError:
-                    # Skip folders that don't match the expected format
-                    continue
-    # Sort users alphabetically by name for consistent display
-    users.sort(key=lambda x: x['name'])
-    return users
+    try:
+        students = Student.query.order_by(Student.name.asc()).all()
+        return [{'name': s.name, 'id': str(s.roll_no)} for s in students]
+    except Exception:
+        # Fallback to folder-based parsing if DB query fails
+        users = []
+        faces_dir = 'static/faces'
+        if os.path.exists(faces_dir):
+            for folder in os.listdir(faces_dir):
+                folder_path = os.path.join(faces_dir, folder)
+                if os.path.isdir(folder_path) and '_' in folder:
+                    try:
+                        name, user_id = folder.rsplit('_', 1)
+                        users.append({'name': name, 'id': user_id})
+                    except ValueError:
+                        continue
+        users.sort(key=lambda x: x['name'])
+        return users
 
 def debug_users_folders():
     """Helper function to debug user folders"""
@@ -324,10 +330,15 @@ def test_camera():
     
     return render_template('debug.html', debug_info=debug_info)
 
-def extract_faces(img):
+def extract_faces(img, scale_factor=1.05, min_neighbors=3):
+    """
+    Extract faces from image using Cascade Classifier
+    More tolerant parameters for rotated faces
+    """
     if img is not None:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        face_points = face_detector.detectMultiScale(gray, 1.3, 5)
+        # Use lower scale_factor and min_neighbors for better detection of rotated faces
+        face_points = face_detector.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
         return face_points
     else:
         return []
@@ -688,17 +699,29 @@ def start():
 
                 # Stable left-to-right ordering prevents identity jumping between faces
                 face_pairs = sorted(zip(face_locations, face_encodings), key=lambda p: p[0][3])
-                
-                # Scale coordinates back to original frame size
+
+                # Scale coordinates back to original frame size while keeping small-face location
                 scale_factor = 1.0 / FACE_DETECTION_SCALE
-                face_pairs = [((int(top * scale_factor), int(right * scale_factor), 
-                               int(bottom * scale_factor), int(left * scale_factor)), encoding)
-                             for (top, right, bottom, left), encoding in face_pairs]
+                converted_pairs = []
+                for (top, right, bottom, left), encoding in face_pairs:
+                    converted_pairs.append({
+                        'big_loc': (
+                            int(top * scale_factor),
+                            int(right * scale_factor),
+                            int(bottom * scale_factor),
+                            int(left * scale_factor),
+                        ),
+                        'small_loc': (top, right, bottom, left),
+                        'encoding': encoding,
+                    })
+                face_pairs = converted_pairs
             else:
                 # Reuse predictions from previous frame to maintain smooth display
                 face_pairs = []
 
-            for (top, right, bottom, left), face_encoding in face_pairs:
+            for face_obj in face_pairs:
+                top, right, bottom, left = face_obj['big_loc']
+                face_encoding = face_obj['encoding']
                 w = right - left
                 h = bottom - top
 
@@ -796,6 +819,9 @@ def start():
                 cv2.imshow('Attendance Check, press "q" to exit', frame)
                 cv2.waitKey(1500)
 
+            elif key == ord('q'):
+                break
+
             elif len(predictions) == 0 and frame_count % 3 == 0:
                 # No face detected
                 cv2.putText(frame, "No face detected", (30, 70),
@@ -804,9 +830,7 @@ def start():
             # Show frame
             cv2.imshow('Attendance Check, press "q" to exit', frame)
 
-            # Exit when user presses 'q'; do not auto-exit after first mark
-            if cv2.waitKey(1) == ord('q'):
-                break
+            # Exit is handled in the single key poll above
     
         # Clean up
         if cap is not None:
@@ -883,67 +907,76 @@ def add():
         warmup_camera(cap, frames=30)
         time.sleep(0.2)
         
-        # Capture images
-        i, j = 0, 0
-        while i < 25:  # Capture more images for better training
+        # Capture images without directional head-pose steps
+        captured_images = 0
+        capture_interval_frames = 5
+        capture_timer = 0
+        no_face_frames = 0
+        
+        while captured_images < 25:
             ret, frame = cap.read()
             if not ret:
                 print("Failed to capture frame")
                 break
-                
-            # Detect faces
-            faces = extract_faces(frame)
             
-            for (x, y, w, h) in faces:
-                # Create larger face region
+            display_frame = frame.copy()
+            
+            # Detect faces for visual feedback (with more tolerant parameters)
+            faces = extract_faces(frame, scale_factor=1.05, min_neighbors=3)
+            
+            # Display header
+            cv2.putText(display_frame, "LOOK AT CAMERA", (20, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 165, 255), 2)
+            cv2.putText(display_frame, "Keep face inside box", (20, 100),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 2)
+            cv2.putText(display_frame, f"Progress: {captured_images}/25", (20, 150),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+            
+            if len(faces) == 0:
+                # No face detected, keep waiting
+                no_face_frames += 1
+                capture_timer = 0
+                
+                cv2.putText(display_frame, f"NO FACE DETECTED", (20, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                cv2.putText(display_frame, f"Position your face in frame", (20, 250),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 2)
+            else:
+                # Face detected
+                no_face_frames = 0
+                # Use the largest face as capture target
+                x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
+                cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+
                 y_margin = int(h * 0.2)
                 x_margin = int(w * 0.2)
                 y1 = max(0, y - y_margin)
                 y2 = min(frame.shape[0], y + h + y_margin)
                 x1 = max(0, x - x_margin)
                 x2 = min(frame.shape[1], x + w + x_margin)
-                
-                # Draw rectangle
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 20), 2)
-                cv2.putText(frame, f'Images: {i}/25', (30, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 20), 2)
-                
-                # Capture image at interval (every 5 frames)
-                if j % 5 == 0 and i < 25:
-                    # Extract face region
-                    face = frame[y1:y2, x1:x2]
-                    
-                    # Save original image
-                    img_name = f"{newusername}_{i}.jpg"
-                    img_path = os.path.join(userimagefolder, img_name)
-                    cv2.imwrite(img_path, face)
-                    
-                    # Save with slight variations for better training
-                    if i % 3 == 0:
-                        # Save slightly brighter version
-                        bright = cv2.convertScaleAbs(face, alpha=1.1, beta=10)
-                        cv2.imwrite(os.path.join(userimagefolder, f"{newusername}_bright_{i}.jpg"), bright)
-                        
-                        # Save slightly darker version
-                        dark = cv2.convertScaleAbs(face, alpha=0.9, beta=-10)
-                        cv2.imwrite(os.path.join(userimagefolder, f"{newusername}_dark_{i}.jpg"), dark)
-                    
-                    print(f"Saved image {i}: {img_name}")
-                    i += 1
-                    
-                    # Show success message
-                    cv2.putText(frame, "Image captured!", (30, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                    cv2.imshow('Adding new User', frame)
-                    cv2.waitKey(200)  # Slight pause
-                
-                j += 1
+
+                capture_timer += 1
+                wait_count = max(0, capture_interval_frames - capture_timer)
+                cv2.putText(display_frame, f"Hold steady ({wait_count})", (20, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+
+                if capture_timer >= capture_interval_frames:
+                    face_region = display_frame[y1:y2, x1:x2]
+                    if face_region.size > 0:
+                        img_name = f"{newusername}_{captured_images}.jpg"
+                        img_path = os.path.join(userimagefolder, img_name)
+                        cv2.imwrite(img_path, face_region)
+                        print(f"Saved image {captured_images+1}: {img_name}")
+                        captured_images += 1
+                        cv2.putText(display_frame, "✓ CAPTURED!", (20, 250),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                    capture_timer = 0
             
             # Show frame
-            cv2.imshow('Adding new User', frame)
+            cv2.imshow('Adding new User', display_frame)
             
             # Check for exit
-            if cv2.waitKey(1) == 27 or i >= 25:  # ESC key
+            if cv2.waitKey(1) == 27:  # ESC key
                 break
         
         # Clean up
@@ -1038,28 +1071,52 @@ def admin_edit_user():
     if not old_name or not old_id or not new_name or not new_id:
         return redirect(url_for('admin'))
 
+    old_name = old_name.strip()
+    old_id = str(old_id).strip()
+    new_name = new_name.strip()
+    new_id = str(new_id).strip()
+
     old_folder = os.path.join('static', 'faces', f"{old_name}_{old_id}")
     new_folder = os.path.join('static', 'faces', f"{new_name}_{new_id}")
+    rename_needed = (old_folder != new_folder)
 
     try:
-        if os.path.isdir(old_folder):
-            # If destination exists, remove it first to avoid errors
-            if os.path.isdir(new_folder):
-                shutil.rmtree(new_folder)
-            os.rename(old_folder, new_folder)
-            print(f"Renamed {old_folder} -> {new_folder}")
+        student = Student.query.filter_by(roll_no=str(old_id)).first()
+        if not student:
+            print(f"Student not found for edit: {old_id}")
+            return redirect(url_for('admin'))
 
-            student = Student.query.filter_by(roll_no=str(old_id)).first()
-            if student:
-                student.roll_no = str(new_id)
-                student.name = new_name
-                db.session.commit()
-                save_student_with_encoding(str(new_id), new_name, department=student.department or "General", folder_path=new_folder)
-
-            # Retrain model so labels reflect new folder name
-            train_model()
+        final_folder = old_folder
+        if rename_needed:
+            if os.path.isdir(old_folder):
+                # If destination exists (different folder), remove it first to avoid rename errors
+                if os.path.isdir(new_folder):
+                    shutil.rmtree(new_folder)
+                os.rename(old_folder, new_folder)
+                final_folder = new_folder
+                print(f"Renamed {old_folder} -> {new_folder}")
+            else:
+                # Continue with DB update even if folder is missing/mismatched.
+                final_folder = new_folder
+                print(f"Source folder not found for rename: {old_folder}. Continuing with DB update.")
         else:
-            print(f"Source folder not found for edit: {old_folder}")
+            print("Edit requested with unchanged name/id; skipping folder rename")
+
+        student.roll_no = str(new_id)
+        student.name = new_name
+        db.session.commit()
+
+        # Update stored encoding only when a usable folder exists.
+        folder_for_encoding = final_folder if os.path.isdir(final_folder) else None
+        save_student_with_encoding(
+            str(new_id),
+            new_name,
+            department=student.department or "General",
+            folder_path=folder_for_encoding,
+        )
+
+        # Retrain model so labels reflect new folder/name when available.
+        train_model()
     except Exception as e:
         print(f"Error renaming user folder: {str(e)}")
     return redirect(url_for('admin'))

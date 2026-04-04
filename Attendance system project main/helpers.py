@@ -4,6 +4,8 @@ import cv2  # type: ignore
 from datetime import datetime
 from database import db
 from models import Student, Attendance
+import pickle
+import face_recognition  # type: ignore
 
 
 def _build_face_encoding_from_folder(folder_path: str):
@@ -89,3 +91,49 @@ def mark_attendance(student_id, status="Present", student_name=None, roll_no=Non
     db.session.add(record)
     db.session.commit()
     return record, True
+
+
+def save_student_with_multiple_encodings(roll_no, name, department="General", encodings_list=None):
+    """Save student with multiple face encodings for multi-angle enrollment."""
+    student = Student.query.filter_by(roll_no=str(roll_no)).first()
+    if student is None:
+        student = Student(roll_no=str(roll_no), name=name, department=department)
+        db.session.add(student)
+    else:
+        student.name = name
+        student.department = department
+
+    if encodings_list and len(encodings_list) > 0:
+        # Store multiple encodings as pickled list
+        student.face_encodings_multi = pickle.dumps(encodings_list)
+
+    db.session.commit()
+    return student
+
+
+def get_all_stored_encodings(student_id):
+    """Retrieve all stored encodings for a student (both single and multiple)."""
+    student = Student.query.get(student_id)
+    if student is None:
+        return []
+
+    all_encodings = []
+    
+    # Get multiple encodings from multi-angle enrollment
+    if student.face_encodings_multi:
+        try:
+            multi_encodings = pickle.loads(student.face_encodings_multi)
+            if isinstance(multi_encodings, list):
+                all_encodings.extend(multi_encodings)
+        except Exception as e:
+            print(f"Error unpickling multiple encodings: {e}")
+
+    # Fallback to single encoding if available
+    if student.face_encoding and len(all_encodings) == 0:
+        try:
+            single_encoding = np.frombuffer(student.face_encoding, dtype=np.float32)
+            all_encodings.append(single_encoding)
+        except Exception as e:
+            print(f"Error converting single encoding: {e}")
+
+    return all_encodings

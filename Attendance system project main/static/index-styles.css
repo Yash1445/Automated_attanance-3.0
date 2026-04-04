@@ -1,0 +1,2 @@
+/* Backward-compatible alias for older templates that still request index-styles.css */
+@import url('style.css');
