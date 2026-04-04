@@ -7,8 +7,8 @@ from models import Student, Attendance
 import pickle
 try:
     import face_recognition
-except:
-    face_recognition = None  # type: ignore
+except ImportError:
+    face_recognition = None
 
 
 def _build_face_encoding_from_folder(folder_path: str):
