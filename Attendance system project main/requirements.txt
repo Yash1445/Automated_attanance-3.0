@@ -1,9 +1,9 @@
-Flask==3.0.3
+flask
+flask-cors
+flask_sqlalchemy
 gunicorn
 numpy
-pandas==2.2.2
+pandas
 joblib
-sqlalchemy
-flask_sqlalchemy
 opencv-python-headless
-flask-cors
+face-recognition
