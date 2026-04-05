@@ -1,9 +1,0 @@
-flask
-flask-cors
-flask_sqlalchemy
-gunicorn
-numpy
-pandas
-joblib
-opencv-python-headless
-face-recognition
