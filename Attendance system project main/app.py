@@ -40,9 +40,37 @@ def recognize():
     np_arr = np.frombuffer(img_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-    print("✅ Frame received from frontend")
+    if face_recognition is None:
+        return {"status": "face_recognition not installed"}
 
-    return {"status": "received"}
+    # Convert BGR → RGB
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Detect faces
+    faces = face_recognition.face_locations(rgb)
+
+    if len(faces) == 0:
+        return {"status": "No face detected"}
+
+    encodings = face_recognition.face_encodings(rgb, faces)
+
+    # Load students from DB
+    students = Student.query.all()
+
+    for encoding in encodings:
+        for student in students:
+            if student.encoding is None:
+                continue
+
+            known_encoding = np.array(student.encoding)
+
+            match = face_recognition.compare_faces([known_encoding], encoding)[0]
+
+            if match:
+                mark_attendance(student)
+                return {"status": f"Attendance marked for {student.name}"}
+
+    return {"status": "Unknown face"}
  
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
