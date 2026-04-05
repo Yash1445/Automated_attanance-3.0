@@ -43,6 +43,62 @@ def recognize():
     if face_recognition is None:
         return {"status": "face_recognition not installed"}
 
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    faces = face_recognition.face_locations(rgb)
+
+    if len(faces) == 0:
+        return {"status": "No face detected"}
+
+    encodings = face_recognition.face_encodings(rgb, faces)
+
+    known_encodings = []
+    known_names = []
+
+    faces_path = "static/faces"
+
+    for person_name in os.listdir(faces_path):
+        person_folder = os.path.join(faces_path, person_name)
+
+        for img_name in os.listdir(person_folder):
+            img_path = os.path.join(person_folder, img_name)
+
+            img = face_recognition.load_image_file(img_path)
+            face_enc = face_recognition.face_encodings(img)
+
+            if len(face_enc) > 0:
+                known_encodings.append(face_enc[0])
+                known_names.append(person_name)
+
+    for face_encoding in encodings:
+        matches = face_recognition.compare_faces(known_encodings, face_encoding)
+
+        if True in matches:
+            match_index = matches.index(True)
+            name = known_names[match_index]
+
+            return {"status": f"Attendance marked for {name}"}
+
+    return {"status": "Unknown face"}
+
+    if len(faces) == 0:
+        return {"status": "No face detected"}
+
+    encodings = face_recognition.face_encodings(rgb, faces)
+
+    # Load students from DB
+  
+@app.route('/api/recognize', methods=['POST'])
+def recognize():
+    data = request.json['image']
+
+    encoded = data.split(",")[1]
+    img_bytes = base64.b64decode(encoded)
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if face_recognition is None:
+        return {"status": "face_recognition not installed"}
+
     # Convert BGR → RGB
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -52,26 +108,41 @@ def recognize():
     if len(faces) == 0:
         return {"status": "No face detected"}
 
+    # Extract encodings
     encodings = face_recognition.face_encodings(rgb, faces)
 
-    # Load students from DB
-    students = Student.query.all()
+    # Load known faces
+    known_encodings = []
+    known_names = []
 
-    for encoding in encodings:
-        for student in students:
-            if student.encoding is None:
-                continue
+    faces_path = "static/faces"
 
-            known_encoding = np.array(student.encoding)
+    for person_name in os.listdir(faces_path):
+        person_folder = os.path.join(faces_path, person_name)
 
-            match = face_recognition.compare_faces([known_encoding], encoding)[0]
+        for img_name in os.listdir(person_folder):
+            img_path = os.path.join(person_folder, img_name)
 
-            if match:
-                mark_attendance(student)
-                return {"status": f"Attendance marked for {student.name}"}
+            img = face_recognition.load_image_file(img_path)
+            face_enc = face_recognition.face_encodings(img)
+
+            if len(face_enc) > 0:
+                known_encodings.append(face_enc[0])
+                known_names.append(person_name)
+
+    # Match faces
+    for face_encoding in encodings:
+        matches = face_recognition.compare_faces(known_encodings, face_encoding)
+
+        if True in matches:
+            match_index = matches.index(True)
+            name = known_names[match_index]
+
+            return {"status": f"Attendance marked for {name}"}
 
     return {"status": "Unknown face"}
- 
+
+    
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
 STRICT_THRESHOLD = float(os.environ.get('FACE_STRICT_THRESHOLD', '0.48'))
