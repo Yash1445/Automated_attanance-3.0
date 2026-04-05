@@ -51,97 +51,22 @@ def recognize():
 
     encodings = face_recognition.face_encodings(rgb, faces)
 
-    known_encodings = []
-    known_names = []
-
-    faces_path = "static/faces"
-
-    for person_name in os.listdir(faces_path):
-        person_folder = os.path.join(faces_path, person_name)
-
-        for img_name in os.listdir(person_folder):
-            img_path = os.path.join(person_folder, img_name)
-
-            img = face_recognition.load_image_file(img_path)
-            face_enc = face_recognition.face_encodings(img)
-
-            if len(face_enc) > 0:
-                known_encodings.append(face_enc[0])
-                known_names.append(person_name)
-
+    # 🔥 FIXED LOOP
     for face_encoding in encodings:
-        matches = face_recognition.compare_faces(known_encodings, face_encoding)
+        name, distance, is_known = identify_face(face_encoding)
 
-        if True in matches:
-            match_index = matches.index(True)
-            name = known_names[match_index]
+        if is_known:
+            if "_" in name:
+                student_name, roll_no = name.rsplit("_", 1)
 
-            return {"status": f"Attendance marked for {name}"}
+                student = Student.query.filter_by(roll_no=roll_no).first()
 
-    return {"status": "Unknown face"}
+                if student:
+                    mark_attendance(student)
 
-    if len(faces) == 0:
-        return {"status": "No face detected"}
+            return {"status": f"Attendance marked for {name} (confidence: {1-distance:.2f})"}
 
-    encodings = face_recognition.face_encodings(rgb, faces)
-
-    # Load students from DB
-  
-@app.route('/api/recognize', methods=['POST'])
-def recognize():
-    data = request.json['image']
-
-    encoded = data.split(",")[1]
-    img_bytes = base64.b64decode(encoded)
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-    if face_recognition is None:
-        return {"status": "face_recognition not installed"}
-
-    # Convert BGR → RGB
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-    # Detect faces
-    faces = face_recognition.face_locations(rgb)
-
-    if len(faces) == 0:
-        return {"status": "No face detected"}
-
-    # Extract encodings
-    encodings = face_recognition.face_encodings(rgb, faces)
-
-    # Load known faces
-    known_encodings = []
-    known_names = []
-
-    faces_path = "static/faces"
-
-    for person_name in os.listdir(faces_path):
-        person_folder = os.path.join(faces_path, person_name)
-
-        for img_name in os.listdir(person_folder):
-            img_path = os.path.join(person_folder, img_name)
-
-            img = face_recognition.load_image_file(img_path)
-            face_enc = face_recognition.face_encodings(img)
-
-            if len(face_enc) > 0:
-                known_encodings.append(face_enc[0])
-                known_names.append(person_name)
-
-    # Match faces
-    for face_encoding in encodings:
-        matches = face_recognition.compare_faces(known_encodings, face_encoding)
-
-        if True in matches:
-            match_index = matches.index(True)
-            name = known_names[match_index]
-
-            return {"status": f"Attendance marked for {name}"}
-
-    return {"status": "Unknown face"}
-
+    return {"status": "Unknown face"} 
     
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
@@ -167,10 +92,6 @@ _ENCODING_CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRY_SECONDS = 300  # Refresh cache every 5 minutes
 
 #### Defining Flask App
-import os
-import base64
-import numpy as np
-import cv2
 
 from flask import Flask, request, render_template, redirect, url_for
 from flask_cors import CORS
