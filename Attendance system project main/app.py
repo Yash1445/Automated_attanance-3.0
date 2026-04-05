@@ -4,30 +4,7 @@ import base64
 import numpy as np
 import cv2
 from database import init_db_config, db
-from flask import Flask, request, render_template, redirect, url_for
 from flask_cors import CORS
-
-# 🔹 CREATE APP
-app = Flask(__name__)
-CORS(app)
-
-# 🔹 CONFIG
-init_db_config(app)
-
-# 🔹 ROUTES
-@app.route('/api/recognize', methods=['POST'])
-def recognize():
-    data = request.json['image']
-
-    encoded = data.split(",")[1]
-    img_bytes = base64.b64decode(encoded)
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-    print("✅ Frame received from frontend")
-
-    return {"status": "received"}
- 
 import os
 try:
     import face_recognition
@@ -46,11 +23,23 @@ from collections import Counter, defaultdict
 import threading
 from queue import Queue
 from sqlalchemy import text
-
-from database import init_db_config, db
 from models import Admin, Student, Attendance
 from helpers import save_student_with_encoding, mark_attendance
 
+# 🔹 ROUTES
+@app.route('/api/recognize', methods=['POST'])
+def recognize():
+    data = request.json['image']
+
+    encoded = data.split(",")[1]
+    img_bytes = base64.b64decode(encoded)
+    np_arr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    print("✅ Frame received from frontend")
+
+    return {"status": "received"}
+ 
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
 STRICT_THRESHOLD = float(os.environ.get('FACE_STRICT_THRESHOLD', '0.48'))
@@ -75,9 +64,16 @@ _ENCODING_CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRY_SECONDS = 300  # Refresh cache every 5 minutes
 
 #### Defining Flask App
-from flask import Flask
-from flask_cors import CORS
+import os
+import base64
+import numpy as np
+import cv2
 
+from flask import Flask, request, render_template, redirect, url_for
+from flask_cors import CORS
+from database import init_db_config, db
+
+# ✅ CREATE APP ONLY ONCE
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "fallback-key")
 
