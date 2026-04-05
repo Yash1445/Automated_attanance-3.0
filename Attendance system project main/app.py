@@ -25,7 +25,11 @@ from queue import Queue
 from sqlalchemy import text
 from models import Admin, Student, Attendance
 from helpers import save_student_with_encoding, mark_attendance
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "fallback-key")
 
+init_db_config(app)
+CORS(app)
 # 🔹 ROUTES
 @app.route('/api/recognize', methods=['POST'])
 def recognize():
@@ -73,12 +77,6 @@ from flask import Flask, request, render_template, redirect, url_for
 from flask_cors import CORS
 from database import init_db_config, db
 
-# ✅ CREATE APP ONLY ONCE
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "fallback-key")
-
-init_db_config(app)
-CORS(app)
 
 with app.app_context():
     db.create_all()
