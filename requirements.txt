@@ -6,4 +6,5 @@ numpy
 pandas
 joblib
 opencv-python-headless
-face-recognition
+python-dotenv
+psycopg2-binary

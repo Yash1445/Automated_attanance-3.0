@@ -7,9 +7,18 @@ from database import init_db_config, db
 from flask_cors import CORS
 import os
 try:
-    import face_recognition
-except:
-    face_recognition = None
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+# Load Haar Cascade for face detection
+cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+if not cascade_path or not os.path.exists(cascade_path):
+    cascade_path = 'haarcascade_frontalface_default.xml'
+
+face_cascade = cv2.CascadeClassifier(cascade_path)
+if face_cascade.empty():
+    print("WARNING: Could not load Haar Cascade")
 from flask import Flask, request, render_template, redirect, url_for, session, flash, Response
 from datetime import date, datetime
 import pandas as pd
@@ -33,40 +42,34 @@ CORS(app)
 # 🔹 ROUTES
 @app.route('/api/recognize', methods=['POST'])
 def recognize():
-    data = request.json['image']
+    try:
+        data = request.json['image']
 
-    encoded = data.split(",")[1]
-    img_bytes = base64.b64decode(encoded)
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        encoded = data.split(",")[1]
+        img_bytes = base64.b64decode(encoded)
+        np_arr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-    if face_recognition is None:
-        return {"status": "face_recognition not installed"}
+        face_locations = detect_faces_cascade(frame)
+        if len(face_locations) == 0:
+            return {"status": "No face detected"}
 
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    faces = face_recognition.face_locations(rgb)
+        for (top, right, bottom, left) in face_locations:
+            face_roi = frame[top:bottom, left:right]
+            if face_roi.size == 0:
+                continue
 
-    if len(faces) == 0:
-        return {"status": "No face detected"}
+            person, confidence, is_known = identify_face(face_roi)
+            if is_known and "_" in person:
+                name, roll_no = person.rsplit("_", 1)
+                saved = add_attendance(name.strip(), roll_no.strip())
+                if saved:
+                    return {"status": f"Attendance marked for {person} (confidence: {confidence:.2f})"}
+                return {"status": f"Already marked for {person} today"}
 
-    encodings = face_recognition.face_encodings(rgb, faces)
-
-    # 🔥 FIXED LOOP
-    for face_encoding in encodings:
-        name, distance, is_known = identify_face(face_encoding)
-
-        if is_known:
-            if "_" in name:
-                student_name, roll_no = name.rsplit("_", 1)
-
-                student = Student.query.filter_by(roll_no=roll_no).first()
-
-                if student:
-                    mark_attendance(student)
-
-            return {"status": f"Attendance marked for {name} (confidence: {1-distance:.2f})"}
-
-    return {"status": "Unknown face"} 
+        return {"status": "Unknown face"}
+    except Exception as e:
+        return {"status": f"Recognition error: {str(e)}"}
     
 # VARIABLES
 MESSAGE = "WELCOME! Instruction: to register your attendance kindly click on 'a' on keyboard"
@@ -401,152 +404,151 @@ def preprocess_face(face):
 
 #### Identify face using face_recognition encodings
 
-def _load_encoding_store():
-    """Load encoding store with caching for better performance on low-end devices"""
-    global _ENCODING_CACHE, _ENCODING_CACHE_TIMESTAMP
+def detect_faces_cascade(frame):
+    """Detect faces using Haar Cascade"""
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        # Convert to (top, right, bottom, left) format
+        face_locs = []
+        for (x, y, w, h) in faces:
+            face_locs.append((y, x + w, y + h, x))
+        return face_locs
+    except Exception as e:
+        print(f"Error in face detection: {e}")
+        return []
+
+def extract_face_descriptor(face_roi):
+    """Extract SIFT/ORB descriptor from a face region"""
+    if face_roi is None or face_roi.size == 0:
+        return None
     
-    if not MODEL_CACHE_ENABLED:
-        # Original behavior: load from disk every time (slower)
-        model_path = 'static/face_recognition_model.pkl'
-        if not os.path.exists(model_path):
-            return [], []
-        data = joblib.load(model_path)
-        if isinstance(data, dict):
-            encodings = data.get('encodings', [])
-            names = data.get('names', [])
-            return encodings, names
-        return [], []
-    
-    # Optimized: use cache with expiry
-    current_time = time.time()
-    
-    with _ENCODING_CACHE_LOCK:
-        # Check if cache is valid
-        if (_ENCODING_CACHE is not None and 
-            current_time - _ENCODING_CACHE_TIMESTAMP < _CACHE_EXPIRY_SECONDS):
-            return _ENCODING_CACHE
+    try:
+        gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
         
-        # Cache miss or expired - reload
-        model_path = 'static/face_recognition_model.pkl'
-        if not os.path.exists(model_path):
-            _ENCODING_CACHE = ([], [])
-            _ENCODING_CACHE_TIMESTAMP = current_time
-            return [], []
-        
+        # Try SIFT first, fallback to ORB
         try:
-            data = joblib.load(model_path)
-            if isinstance(data, dict):
-                encodings = data.get('encodings', [])
-                names = data.get('names', [])
-                _ENCODING_CACHE = (encodings, names)
-                _ENCODING_CACHE_TIMESTAMP = current_time
-                return encodings, names
-        except Exception as e:
-            print(f"Error loading encoding cache: {e}")
-            _ENCODING_CACHE = ([], [])
-            _ENCODING_CACHE_TIMESTAMP = current_time
-            return [], []
+            sift = cv2.SIFT_create()
+            kp, des = sift.detectAndCompute(gray, None)
+        except:
+            orb = cv2.ORB_create(nfeatures=200)
+            kp, des = orb.detectAndCompute(gray, None)
         
-        _ENCODING_CACHE = ([], [])
-        _ENCODING_CACHE_TIMESTAMP = current_time
-        return [], []
+        if des is None or len(des) == 0:
+            hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+            return hist.flatten()
+        
+        return des
+    except Exception as e:
+        print(f"Error extracting features: {e}")
+        return None
 
+def match_face_descriptors(test_desc, ref_desc):
+    """Match two face descriptors and return similarity score"""
+    if test_desc is None or ref_desc is None:
+        return 0.0
+    
+    try:
+        # Histogram comparison
+        if test_desc.ndim == 1 and ref_desc.ndim == 1:
+            distance = cv2.compareHist(
+                test_desc.astype(np.uint8) if test_desc.dtype != np.uint8 else test_desc,
+                ref_desc.astype(np.uint8) if ref_desc.dtype != np.uint8 else ref_desc,
+                cv2.HISTCMP_BHATTACHARYYA
+            )
+            return 1.0 - distance
+        
+        # Feature descriptor matching
+        if test_desc.ndim == 2 and ref_desc.ndim == 2:
+            bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+            knn_matches = bf.knnMatch(test_desc, ref_desc, k=2)
+            
+            good_matches = []
+            for match_pair in knn_matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.75 * n.distance:
+                        good_matches.append(m)
+            
+            if len(good_matches) == 0:
+                return 0.0
+            
+            return min(1.0, len(good_matches) / 15.0)
+    except:
+        pass
+    
+    return 0.0
 
-def recognize_face(face_encoding, known_encodings, known_names):
-    if len(known_encodings) == 0:
-        return "unknown", 1.0, False
-
-    distances = face_recognition.face_distance(known_encodings, face_encoding)
-
-    user_to_distances = defaultdict(list)
-    for d, user in zip(distances, known_names):
-        user_to_distances[user].append(float(d))
-
-    if not user_to_distances:
-        return "unknown", 1.0, False
-
-    user_scores = {}
-    for user, dists in user_to_distances.items():
-        dists_sorted = sorted(dists)
-        k = min(TOP_K_PER_USER, len(dists_sorted))
-        user_scores[user] = float(np.mean(dists_sorted[:k]))
-
-    best_user = min(user_scores, key=lambda x: user_scores[x])
-    best_score = user_scores[best_user]
-
-    sorted_scores = sorted(user_scores.values())
-    second_score = sorted_scores[1] if len(sorted_scores) > 1 else 1.0
-    margin_ok = (second_score - best_score) >= AMBIGUITY_MARGIN
-
-    if best_score <= STRICT_THRESHOLD and margin_ok:
-        return best_user, best_score, True
-
+def identify_face(face_roi):
+    """Identify face by comparing with registered users"""
+    test_desc = extract_face_descriptor(face_roi)
+    if test_desc is None:
+        return "unknown", 0.0, False
+    
+    faces_dir = 'static/faces'
+    if not os.path.exists(faces_dir):
+        return "unknown", 0.0, False
+    
+    best_match = "unknown"
+    best_score = 0.0
+    scores_by_user = defaultdict(list)
+    
+    # Compare with each registered user
+    for user in os.listdir(faces_dir):
+        user_path = os.path.join(faces_dir, user)
+        if not os.path.isdir(user_path):
+            continue
+        
+        images = [f for f in os.listdir(user_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        if not images:
+            continue
+        
+        # Use up to 3 reference images
+        for img_name in images[:3]:
+            try:
+                img_path = os.path.join(user_path, img_name)
+                ref_img = cv2.imread(img_path)
+                if ref_img is None:
+                    continue
+                
+                # Detect faces in reference image
+                ref_faces = detect_faces_cascade(ref_img)
+                if not ref_faces:
+                    continue
+                
+                # Use first detected face
+                top, right, bottom, left = ref_faces[0]
+                ref_roi = ref_img[top:bottom, left:right]
+                
+                ref_desc = extract_face_descriptor(ref_roi)
+                if ref_desc is None:
+                    continue
+                
+                # Match descriptors
+                score = match_face_descriptors(test_desc, ref_desc)
+                scores_by_user[user].append(score)
+            except Exception as e:
+                continue
+    
+    # Calculate average score for each user
+    if scores_by_user:
+        for user, scores in scores_by_user.items():
+            avg_score = np.mean(scores)
+            if avg_score > best_score:
+                best_score = avg_score
+                best_match = user
+    
+    # Accept match if score is high enough
+    if best_score > 0.35:
+        return best_match, best_score, True
+    
     return "unknown", best_score, False
 
-
-def identify_face(face_encoding):
-    try:
-        known_encodings, known_names = _load_encoding_store()
-        return recognize_face(face_encoding, known_encodings, known_names)
-    except Exception as e:
-        print(f"Error in face recognition: {str(e)}")
-        return "unknown", 1.0, False
-
-
-#### Build encoding store from all faces in dataset
 def train_model():
-    try:
-        known_face_encodings = []
-        known_face_names = []
-        userlist = os.listdir('static/faces')
+    """Training is not needed with feature-based matching"""
+    print("Feature-based matching doesn't require explicit training")
+    return True
 
-        if len(userlist) == 0:
-            print("No users to train on!")
-            return False
-
-        for user in userlist:
-            user_folder = f'static/faces/{user}'
-            if not os.path.isdir(user_folder):
-                continue
-
-            image_files = [f for f in os.listdir(user_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-            if len(image_files) == 0:
-                print(f"No images for user {user}")
-                continue
-
-            print(f"Training on {len(image_files)} images for {user}")
-            for imgname in image_files:
-                img_path = f'{user_folder}/{imgname}'
-                try:
-                    image = face_recognition.load_image_file(img_path)
-                    locations = face_recognition.face_locations(image, model='hog', number_of_times_to_upsample=FACE_DETECTION_UPSAMPLE)
-                    encodings = face_recognition.face_encodings(image, locations)
-                    if len(encodings) == 0:
-                        print(f"No face encoding found: {img_path}")
-                        continue
-
-                    # Store first face encoding from each image
-                    known_face_encodings.append(encodings[0])
-                    known_face_names.append(user)
-                except Exception as ex:
-                    print(f"Failed to encode {img_path}: {ex}")
-
-        if len(known_face_encodings) == 0:
-            print("No valid face encodings found for training!")
-            return False
-
-        data = {
-            'encodings': known_face_encodings,
-            'names': known_face_names,
-            'threshold': STRICT_THRESHOLD,
-            'updated_at': datetime.now().isoformat()
-        }
-        joblib.dump(data, 'static/face_recognition_model.pkl')
-        print(f"Encoding store saved with {len(known_face_encodings)} samples from {len(set(known_face_names))} users")
-        return True
-    except Exception as e:
-        print(f"Error training model: {str(e)}")
-        return False
 
 #### Extract today's attendance from PostgreSQL (single source of truth)
 def extract_attendance():
@@ -614,304 +616,142 @@ def home():
                            registered_users=registered_users, totalreg=totalreg(),
                            datetoday2=datetoday2, mess=MESSAGE)
 
+#### Global camera for streaming
+global_cap = None
+global_cap_lock = threading.Lock()
+
 #### This function will run when we click on Take Attendance Button - REQUIRES LOGIN
 @app.route('/start', methods=['GET', 'POST'])
 @login_required
 def start():
-    ATTENDANCE_MARKED = False
-    message = ""
+    return render_template('camera.html', datetoday2=datetoday2)
 
-    # 🚀 BLOCK CAMERA ON RENDER
-    if os.environ.get("RENDER") == "true":
-        message = "⚠️ Camera not supported on cloud. Use local system for attendance."
-        registered_users = get_registered_users()
-        names, rolls, times, l = extract_attendance()
-
-        return render_template(
-            'home.html',
-            names=names,
-            rolls=rolls,
-            times=times,
-            l=l,
-            registered_users=registered_users,
-            totalreg=totalreg(),
-            datetoday2=datetoday2,
-            mess=message
-        )
-
-    # ✅ LOCAL MACHINE CAMERA LOGIC
-    try:
-        print("Initializing camera...")
-        cap = open_camera()
-
-        if cap is None:
-            message = "Could not access camera"
-            registered_users = get_registered_users()
-
-            return render_template(
-                'home.html',
-                names=[], rolls=[], times=[], l=0,
-                registered_users=registered_users,
-                totalreg=totalreg(),
-                datetoday2=datetoday2,
-                mess=message
-            )
-
-        # 👉 Continue your existing camera logic here
-
-    except Exception as e:
-        print("Error:", str(e))
-        message = "Error starting camera"
-
-        registered_users = get_registered_users()
-        return render_template(
-            'home.html',
-            names=[], rolls=[], times=[], l=0,
-            registered_users=registered_users,
-            totalreg=totalreg(),
-            datetoday2=datetoday2,
-            mess=message
-        )
+@app.route('/video_feed')
+@login_required
+def video_feed():
+    """Stream video frames to browser"""
+    def generate():
+        global global_cap, global_cap_lock
         
-        # Check if model exists
-        if not os.path.exists('static/face_recognition_model.pkl'):
-            message = "Face recognition model not found! Please register users first."
-            print(message)
-            cap.release()
-            registered_users = get_registered_users()
-            return render_template('home.html', names=[], rolls=[], times=[], l=0, 
-                                  registered_users=registered_users, totalreg=totalreg(), 
-                                  datetoday2=datetoday2, mess=message)
-        
-        # Helper: load today's already-marked set to avoid duplicates
-        def get_marked_set():
+        try:
+            with global_cap_lock:
+                if global_cap is None:
+                    global_cap = open_camera()
+                cap = global_cap
+            
+            if cap is None:
+                print("Camera failed to open")
+                return
+            
+            # No explicit model check needed for feature-based matching
+            
+            # Load marked set
             try:
                 names, rolls, _, _ = extract_attendance()
-                # Normalize to strings to avoid int/string mismatches that cause duplicates
-                return set((str(n), str(r)) for n, r in zip(names, rolls))
-            except Exception:
-                return set()
-
-        marked_set = get_marked_set()
-
-        # Main attendance loop (supports multiple faces)
-        consecutive_fail = 0
-        frame_count = 0
-        last_unknown_log_ts = 0.0
-        last_predictions = []  # Cache recent predictions for smooth display
-        fps_timer = time.time()
-        fps_counter = 0
-        current_fps = 0.0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                message = "Failed to capture frame from camera"
-                print(f"Frame read failed: ret={ret}, frame is None: {frame is None}")
-                consecutive_fail += 1
-                if consecutive_fail > 30:  # Increased threshold
-                    message = f"Camera connection lost after {consecutive_fail} failed attempts. Please check camera connection and try again."
-                    print(message)
-                    break
-                time.sleep(0.05)  # Longer sleep between retries
-                continue
-
-            # Validate frame
-            if frame.size == 0 or frame.shape[0] < 10 or frame.shape[1] < 10:
-                print(f"Invalid frame dimensions: {frame.shape if frame is not None else 'None'}")
-                consecutive_fail += 1
-                if consecutive_fail > 30:
-                    message = "Camera producing invalid frames. Please restart the application."
-                    break
-                time.sleep(0.05)
-                continue
-
+                marked_set = set((str(n), str(r)) for n, r in zip(names, rolls))
+            except:
+                marked_set = set()
+            
+            frame_count = 0
             consecutive_fail = 0
-            frame_count += 1
-
-            # Per-frame reset to avoid cross-face contamination
-            recognized_names = []
-            predictions = []
-
-            # OPTIMIZATION: Only process face detection every Nth frame (skip frames for low-end devices)
-            should_detect_faces = (frame_count % FRAME_SKIP) == 0
             
-            if should_detect_faces:
-                # Optimized face detection with lower resolution and reduced upsampling
-                small_frame = cv2.resize(frame, (0, 0), fx=FACE_DETECTION_SCALE, fy=FACE_DETECTION_SCALE)
-                rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-                face_locations = face_recognition.face_locations(
-                    rgb_small,
-                    model="hog",
-                    number_of_times_to_upsample=FACE_DETECTION_UPSAMPLE
-                )
-                face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
-
-                # Stable left-to-right ordering prevents identity jumping between faces
-                face_pairs = sorted(zip(face_locations, face_encodings), key=lambda p: p[0][3])
-
-                # Scale coordinates back to original frame size while keeping small-face location
-                scale_factor = 1.0 / FACE_DETECTION_SCALE
-                converted_pairs = []
-                for (top, right, bottom, left), encoding in face_pairs:
-                    converted_pairs.append({
-                        'big_loc': (
-                            int(top * scale_factor),
-                            int(right * scale_factor),
-                            int(bottom * scale_factor),
-                            int(left * scale_factor),
-                        ),
-                        'small_loc': (top, right, bottom, left),
-                        'encoding': encoding,
-                    })
-                face_pairs = converted_pairs
-            else:
-                # Reuse predictions from previous frame to maintain smooth display
-                face_pairs = []
-
-            for face_obj in face_pairs:
-                top, right, bottom, left = face_obj['big_loc']
-                face_encoding = face_obj['encoding']
-                w = right - left
-                h = bottom - top
-
-                # Independent state for each face
-                person = "unknown"
-                distance = 1.0
-
-                if w >= MIN_FACE_SIZE and h >= MIN_FACE_SIZE:
-                    raw_person, distance, is_known = identify_face(face_encoding)
-                    if is_known:
-                        person = raw_person
-                        recognized_names.append(person)
-
-                color = (0, 255, 0) if person != "unknown" else (0, 0, 255)
-                cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-
-                if person != "unknown" and '_' in person:
-                    name, roll = person.rsplit('_', 1)
-                    label_text = f"{name} (ID: {roll}) Confidence: {distance:.2f}"
-                elif person != "unknown":
-                    label_text = f"{person} Confidence: {distance:.2f}"
-                else:
-                    label_text = "Unknown Person Detected"
-                    now_ts = time.time()
-                    if now_ts - last_unknown_log_ts >= UNKNOWN_LOG_COOLDOWN_SEC:
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Unknown face detected")
-                        last_unknown_log_ts = now_ts
-
-                cv2.putText(frame, label_text, (left, max(20, top - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                predictions.append((left, top, w, h, person, distance))
-
-            # Cache predictions for smooth display even when skipping frames
-            if should_detect_faces and predictions:
-                last_predictions = predictions
-
-            # Show instruction text once per frame
-            cv2.putText(frame, "Press 'a' to mark ALL visible faces", (30, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            
-            # Display FPS counter for performance monitoring
-            fps_counter += 1
-            elapsed = time.time() - fps_timer
-            if elapsed >= 1.0:
-                current_fps = fps_counter / elapsed
-                fps_timer = time.time()
-                fps_counter = 0
-            
-            fps_text = f"FPS: {current_fps:.1f} | Processing: {'YES' if should_detect_faces else 'NO (cached)'}"
-            cv2.putText(frame, fps_text, (30, frame.shape[0] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
-            # Process key press (single press marks multiple faces)
-            key = cv2.waitKey(1)
-            if key == ord('a'):
-                marked_count = 0
-                already_marked_count = 0
-                # Use cached predictions if current detection didn't find faces
-                active_predictions = predictions if predictions else last_predictions
-                for (x, y, w, h, person, distance) in active_predictions:
-                    if person == "unknown":
-                        # Optional: indicate unknown
-                        cv2.putText(frame, f"Unknown (d={distance:.2f})", (x, max(0, y - 30)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                        continue
-
-                    if '_' in person:
-                        name, roll = person.rsplit('_', 1)
-                        if (name, roll) not in marked_set:
-                            # Mark attendance for new user
-                            add_attendance(name, roll)
-                            marked_set.add((name, roll))
-                            ATTENDANCE_MARKED = True
-                            marked_count += 1
-                            # Visual confirmation near that specific face - clear "Marked" message
-                            cv2.putText(frame, "Marked", (x, y + h + 25),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                        else:
-                            # User already marked today
-                            already_marked_count += 1
-                            cv2.putText(frame, "Already Marked Today", (x, y + h + 25),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
-
-                # Build professional message
-                if marked_count > 0 and already_marked_count > 0:
-                    message = f"Attendance marked for {marked_count} user(s). {already_marked_count} already marked today."
-                elif marked_count > 0:
-                    message = f"Attendance marked for {marked_count} user(s)"
-                elif already_marked_count > 0:
-                    message = f"{already_marked_count} user(s) already marked today"
-                else:
-                    message = "No known faces to mark"
-
-                # Show frame with confirmations briefly
-                #cv2.imshow('Attendance Check, press "q" to exit', frame)
-                #cv2.waitKey(1500)
-
-           
-
-            elif len(predictions) == 0 and frame_count % 3 == 0:
-                # No face detected
-                cv2.putText(frame, "No face detected", (30, 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
-            # Show frame
-            #cv2.imshow('Attendance Check, press "q" to exit', frame)
-
-            # Exit is handled in the single key poll above
-    
-        # Clean up
-        if cap is not None:
-            cap.release()
-        cv2.destroyAllWindows()
+            while True:
+                with global_cap_lock:
+                    ret, frame = cap.read()
+                
+                if not ret or frame is None:
+                    consecutive_fail += 1
+                    if consecutive_fail > 30:
+                        break
+                    time.sleep(0.05)
+                    continue
+                
+                consecutive_fail = 0
+                frame_count += 1
+                
+                # Detect and mark faces
+                should_detect = (frame_count % FRAME_SKIP) == 0
+                
+                try:
+                    if should_detect:
+                        # Detect faces using Haar Cascade
+                        face_locations = detect_faces_cascade(frame)
+                        
+                        for (top, right, bottom, left) in face_locations:
+                            # Extract face region
+                            face_roi = frame[top:bottom, left:right]
+                            if face_roi.size == 0:
+                                continue
+                            
+                            # Identify the face
+                            person, confidence, is_known = identify_face(face_roi)
+                            
+                            if is_known and '_' in person:
+                                name, roll = person.rsplit('_', 1)
+                                color = (0, 255, 0)
+                                
+                                if (name, roll) not in marked_set:
+                                    add_attendance(name.strip(), roll.strip())
+                                    marked_set.add((name, roll))
+                                    label = f"✓ {name} ({roll}) - {confidence:.0%}"
+                                else:
+                                    label = f"✓ {name} ({roll}) - Already marked"
+                            else:
+                                color = (0, 0, 255)
+                                label = f"Unknown"
+                            
+                            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+                            cv2.putText(frame, label, (left, max(20, top - 10)),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                    # Add instruction text
+                    cv2.putText(frame, "Press 'q' to close", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    
+                except Exception as e:
+                    print(f"Face detection error: {e}")
+                
+                # Encode frame to JPEG
+                ret, buffer = cv2.imencode('.jpg', frame)
+                frame_bytes = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n'
+                       b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n'
+                       + frame_bytes + b'\r\n')
+                
+                time.sleep(0.03)
         
-        # Update attendance records
-        names, rolls, times, l = extract_attendance()
-        registered_users = get_registered_users()
-        
-        # Set final message
-        if not message:
-            message = 'Attendance taken successfully' if ATTENDANCE_MARKED else 'No attendance taken'
-        
-        return render_template('home.html', names=names, rolls=rolls, times=times, l=l, 
-                              registered_users=registered_users, totalreg=totalreg(), 
-                              datetoday2=datetoday2, mess=message)
-    except Exception as e:
-        message = f"Error: {str(e)}"
-        print(message)
-        import traceback
-        traceback.print_exc()
-        try:
-            if 'cap' in locals() and cap is not None:
-                cap.release()
+        except Exception as e:
+            print(f"Stream error: {e}")
+        finally:
+            with global_cap_lock:
+                if global_cap is not None:
+                    global_cap.release()
+                    global_cap = None
             cv2.destroyAllWindows()
-        except:
-            pass
-        registered_users = get_registered_users()
-        return render_template('home.html', names=[], rolls=[], times=[], l=0, 
-                              registered_users=registered_users, totalreg=totalreg(), 
-                              datetoday2=datetoday2, mess=message)
+    
+    return Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/stop_camera', methods=['POST'])
+@login_required
+def stop_camera():
+    """Stop camera and return attendance data"""
+    global global_cap, global_cap_lock
+    
+    with global_cap_lock:
+        if global_cap is not None:
+            global_cap.release()
+            global_cap = None
+    cv2.destroyAllWindows()
+    
+    names, rolls, times, l = extract_attendance()
+    registered_users = get_registered_users()
+    message = "Attendance marking complete"
+    
+    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, 
+                          registered_users=registered_users, totalreg=totalreg(), 
+                          datetoday2=datetoday2, mess=message)
 
 
 @app.route('/instructions')
