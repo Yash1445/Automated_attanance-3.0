@@ -11,6 +11,18 @@ except ImportError:
     face_recognition = None
 
 
+def _normalize_encoding_vector(encoding):
+    array = np.asarray(encoding, dtype=np.float32).ravel()
+    if array.size == 0:
+        return None
+
+    norm = np.linalg.norm(array)
+    if norm == 0:
+        return None
+
+    return array / norm
+
+
 def _build_face_encoding_from_folder(folder_path: str):
     if not os.path.isdir(folder_path):
         return None
@@ -36,7 +48,7 @@ def _build_face_encoding_from_folder(folder_path: str):
     return avg_encoding.tobytes()
 
 
-def save_student_with_encoding(roll_no, name, department="General", folder_path=None):
+def save_student_with_encoding(roll_no, name, department="General", folder_path=None, encoding=None):
     student = Student.query.filter_by(roll_no=str(roll_no)).first()
     if student is None:
         student = Student(roll_no=str(roll_no), name=name, department=department)
@@ -45,7 +57,11 @@ def save_student_with_encoding(roll_no, name, department="General", folder_path=
         student.name = name
         student.department = department
 
-    if folder_path:
+    if encoding is not None:
+        normalized_encoding = _normalize_encoding_vector(encoding)
+        if normalized_encoding is not None:
+            student.face_encoding = normalized_encoding.astype(np.float32).tobytes()
+    elif folder_path:
         binary_encoding = _build_face_encoding_from_folder(folder_path)
         if binary_encoding is not None:
             student.face_encoding = binary_encoding
@@ -107,8 +123,16 @@ def save_student_with_multiple_encodings(roll_no, name, department="General", en
         student.department = department
 
     if encodings_list and len(encodings_list) > 0:
-        # Store multiple encodings as pickled list
-        student.face_encodings_multi = pickle.dumps(encodings_list)
+        normalized_encodings = []
+        for encoding in encodings_list:
+            normalized_encoding = _normalize_encoding_vector(encoding)
+            if normalized_encoding is not None:
+                normalized_encodings.append(normalized_encoding)
+
+        if normalized_encodings:
+            # Store multiple encodings as pickled list
+            student.face_encodings_multi = pickle.dumps(normalized_encodings)
+            student.face_encoding = np.mean(np.array(normalized_encodings, dtype=np.float32), axis=0).astype(np.float32).tobytes()
 
     db.session.commit()
     return student
@@ -127,7 +151,10 @@ def get_all_stored_encodings(student_id):
         try:
             multi_encodings = pickle.loads(student.face_encodings_multi)
             if isinstance(multi_encodings, list):
-                all_encodings.extend(multi_encodings)
+                for encoding in multi_encodings:
+                    normalized_encoding = _normalize_encoding_vector(encoding)
+                    if normalized_encoding is not None:
+                        all_encodings.append(normalized_encoding)
         except Exception as e:
             print(f"Error unpickling multiple encodings: {e}")
 
@@ -135,7 +162,9 @@ def get_all_stored_encodings(student_id):
     if student.face_encoding and len(all_encodings) == 0:
         try:
             single_encoding = np.frombuffer(student.face_encoding, dtype=np.float32)
-            all_encodings.append(single_encoding)
+            normalized_encoding = _normalize_encoding_vector(single_encoding)
+            if normalized_encoding is not None:
+                all_encodings.append(normalized_encoding)
         except Exception as e:
             print(f"Error converting single encoding: {e}")
 

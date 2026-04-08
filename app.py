@@ -503,8 +503,8 @@ def identify_face(face_roi):
         if not images:
             continue
         
-        # Use up to 3 reference images
-        for img_name in images[:3]:
+        # ✅ USE ALL REFERENCE IMAGES (better for multi-angle)
+        for img_name in images:
             try:
                 img_path = os.path.join(user_path, img_name)
                 ref_img = cv2.imread(img_path)
@@ -530,16 +530,16 @@ def identify_face(face_roi):
             except Exception as e:
                 continue
     
-    # Calculate average score for each user
+    # ✅ Use MEDIAN (more robust than mean for multi-angle)
     if scores_by_user:
         for user, scores in scores_by_user.items():
-            avg_score = np.mean(scores)
-            if avg_score > best_score:
-                best_score = avg_score
+            median_score = np.median(scores)
+            if median_score > best_score:
+                best_score = median_score
                 best_match = user
     
-    # Accept match if score is high enough
-    if best_score > 0.35:
+    # ✅ LOWER THRESHOLD for angle tolerance
+    if best_score > 0.20:  # Was 0.30
         return best_match, best_score, True
     
     return "unknown", best_score, False
@@ -598,7 +598,7 @@ def add_attendance(name, roll):
             print(f"Attendance already marked for {name}_{roll} today")
             return False
 
-    except Exception as e:
+    except Exception as e:s
         print(f"✗ Error adding attendance: {str(e)}")
         import traceback
         traceback.print_exc()
