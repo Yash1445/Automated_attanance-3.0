@@ -598,7 +598,7 @@ def add_attendance(name, roll):
             print(f"Attendance already marked for {name}_{roll} today")
             return False
 
-    except Exception as e:s
+    except Exception as e:
         print(f"✗ Error adding attendance: {str(e)}")
         import traceback
         traceback.print_exc()
