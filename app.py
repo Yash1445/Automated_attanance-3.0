@@ -1,5 +1,3 @@
-# 🔹 imports FIRST
-# 🔹 ALL IMPORTS FIRST
 import base64
 import numpy as np
 import cv2
